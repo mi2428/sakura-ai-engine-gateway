@@ -104,20 +104,6 @@ sum by (model) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unk
 sum by (account_slot, model, token_type) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown"}[$__range]))
 ```
 
-Notes:
-
-- `model` is the requested model ID.
-- `account_slot` is the one-based position in `SAKURA_AI_ENGINE_ACCOUNT_TOKENS`; keep token ordering stable to preserve per-slot history.
-- Credential values, hashes, and client IDs are not labels. Exact model-label collisions use `unknown`.
-- Model names missing from requests or invalid for labels use `unknown`; after 128 distinct names, further names are grouped as `other`.
-- Usage comes only from fields returned by Sakura. Streaming usage is counted only when the upstream response includes it. JSON response observation is limited to 1 MiB and each streaming event to 64 KiB; incomplete responses are counted separately.
-- The gateway does not receive monetary charges from completion responses, so these metrics cannot show cost or backfill usage from before Prometheus began scraping.
-- Metrics and rate-limit cooldowns are process-local and reset on restart. Run a single replica.
-
-Retries happen before response headers are sent; failures after streaming starts are not retried.
-A retry may trigger another completion if Sakura processed the request but its response was lost.
-On timeout retries, `reasoning_effort` values `medium` and `high` are lowered to `low`.
-
 ## Development
 
 To run `make check`, install Go, `golangci-lint`, Hadolint, Yamllint, Kubeconform, Docker Compose, and `kubectl`:
