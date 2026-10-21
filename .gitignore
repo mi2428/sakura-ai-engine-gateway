@@ -1,0 +1,57 @@
+# Created by https://www.toptal.com/developers/gitignore/api/macos,linux,vim
+# Edit at https://www.toptal.com/developers/gitignore?templates=macos,linux,vim
+
+### Linux ###
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+### macOS ###
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS Icon filenames end in a carriage return (not arbitrary characters).
+Icon[[:cntrl:]]
+
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+*.icloud
+
+### Vim ###
+[._]*.s[a-v][a-z]
+!*.svg
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+Session.vim
+Sessionx.vim
+.netrwhist
+tags
+# Vim's tags file is ignored, but source directories named tags are not.
+!**/tags/
+[._]*.un~
+
+# End of https://www.toptal.com/developers/gitignore/api/macos,linux,vim
+
+### Go and local configuration ###
+# Vim's SVG exception must not re-include macOS AppleDouble files.
+._*
+/build/
+/coverage.out
+/coverage.html
+/.env
