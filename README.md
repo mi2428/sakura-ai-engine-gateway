@@ -3,7 +3,25 @@
 A Sakura AI Engine gateway that exposes OpenAI-compatible `/v1/models` and `/v1/chat/completions` endpoints.
 Clients use their own tokens; the gateway rotates configured Sakura account tokens upstream.
 
-## Run Locally
+## Getting Started
+
+### Kubernetes (recommended)
+
+[`k8s/base/`](k8s/base) provides a Deployment and ClusterIP Service.
+Before deployment, provision a Secret named `sakura-ai-engine-gateway-credentials` in the target namespace with the two required credential keys.
+The consuming overlay must pin the source commit and image digest, and provide an environment-specific ingress.
+
+> [!IMPORTANT]
+> The base's `:must-pin` image tag is not published; replace it with an immutable digest.
+> Keep credentials outside Kustomize, and expose the Service only through an ingress that restricts access to intended clients.
+> Do not expose the Service as a public LoadBalancer.
+
+The base requests 2 GiB and limits the container to 6 GiB.
+The default limits allow up to 1.5 GiB of request bodies across 24 concurrent requests, before runtime overhead.
+The Deployment runs one replica with the `Recreate` strategy because cooldown state is process-local.
+In-progress streams can be interrupted during upgrades.
+
+### Docker Compose
 
 Requires Docker Compose and a Sakura account token.
 Copy `.env.example` to `.env`, set `SAKURA_AI_ENGINE_ACCOUNT_TOKENS` to a JSON array of upstream tokens, and configure `GATEWAY_CLIENT_TOKENS` with a local client token.
@@ -66,25 +84,9 @@ A retry may trigger another completion if Sakura processed the request but its r
 On timeout retries, `reasoning_effort` values `medium` and `high` are lowered to `low`.
 Rate-limit cooldowns are stored per process, so run a single replica.
 
-## Kubernetes Deployment
-
-`k8s/base/` provides a Deployment and ClusterIP Service.
-Before deployment, provision a Secret named `sakura-ai-engine-gateway-credentials` in the target namespace with the two required credential keys.
-The consuming overlay must pin the source commit and image digest, and provide an environment-specific ingress.
-
-> [!IMPORTANT]
-> The base's `:must-pin` image tag is not published; replace it with an immutable digest.
-> Keep credentials outside Kustomize, and expose the Service only through an ingress that restricts access to intended clients.
-> Do not expose the Service as a public LoadBalancer.
-
-The base requests 2 GiB and limits the container to 6 GiB.
-The default limits allow up to 1.5 GiB of request bodies across 24 concurrent requests, before runtime overhead.
-The Deployment runs one replica with the `Recreate` strategy because cooldown state is process-local.
-In-progress streams can be interrupted during upgrades.
-
 ## Development
 
-To run `make check`, install Go 1.27, `golangci-lint` 2.x, Hadolint, Yamllint, Kubeconform, Docker Compose, and `kubectl`:
+To run `make check`, install Go, `golangci-lint`, Hadolint, Yamllint, Kubeconform, Docker Compose, and `kubectl`:
 
 ```console
 $ make check build
