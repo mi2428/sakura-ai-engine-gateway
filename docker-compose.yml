@@ -1,0 +1,25 @@
+services:
+  gateway:
+    image: sakura-ai-engine-gateway:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      GATEWAY_LISTEN_ADDRESS: ":8080"
+      SAKURA_AI_ENGINE_API_URL: "${SAKURA_AI_ENGINE_API_URL:-https://api.ai.sakura.ad.jp}"
+      SAKURA_AI_ENGINE_ACCOUNT_TOKENS: "${SAKURA_AI_ENGINE_ACCOUNT_TOKENS:?copy .env.example to .env and configure account tokens}"
+      GATEWAY_CLIENT_TOKENS: "${GATEWAY_CLIENT_TOKENS:?copy .env.example to .env and configure client tokens}"
+      GATEWAY_MAX_REQUEST_BYTES: "${GATEWAY_MAX_REQUEST_BYTES:-67108864}"
+      GATEWAY_MAX_CONCURRENT_REQUESTS: "${GATEWAY_MAX_CONCURRENT_REQUESTS:-24}"
+      GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT: "${GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT:-24}"
+    ports:
+      - "127.0.0.1:${GATEWAY_LOCAL_PORT:-38082}:8080"
+    read_only: true
+    user: "65532:65532"
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_reservation: 2g
+    mem_limit: 6g
+    stop_grace_period: 40s
+    restart: on-failure

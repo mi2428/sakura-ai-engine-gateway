@@ -1,0 +1,9 @@
+.git
+.env
+.env.example
+.golangci.yml
+coverage.out
+coverage.html
+build
+internal/gateway/*_test.go
+cmd/sakura-ai-engine-gateway/*_test.go
