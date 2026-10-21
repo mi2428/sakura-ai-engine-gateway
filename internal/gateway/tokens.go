@@ -17,6 +17,11 @@ type tokenLease struct {
 	token string
 }
 
+type tokenSlotMetricSnapshot struct {
+	cooldown        time.Duration
+	rateLimitStreak int
+}
+
 // tokenPool rotates through every configured token and tracks provider-driven
 // cooldowns within one process. It does not serialize requests per token.
 type tokenPool struct {
@@ -131,4 +136,18 @@ func (pool *tokenPool) nextAvailableWaitLocked(now time.Time) time.Duration {
 func (pool *tokenPool) notifyLocked() {
 	close(pool.changed)
 	pool.changed = make(chan struct{})
+}
+
+func (pool *tokenPool) metricsSnapshot() []tokenSlotMetricSnapshot {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	now := time.Now()
+	snapshot := make([]tokenSlotMetricSnapshot, len(pool.slots))
+	for index, slot := range pool.slots {
+		snapshot[index] = tokenSlotMetricSnapshot{
+			cooldown:        max(0, slot.cooldownUntil.Sub(now)),
+			rateLimitStreak: slot.rateLimitRun,
+		}
+	}
+	return snapshot
 }
