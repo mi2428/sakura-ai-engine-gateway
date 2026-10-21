@@ -51,10 +51,12 @@ The host port is published on loopback only.
 | Method | Path | Authentication |
 | --- | --- | --- |
 | `GET` | `/health`, `/readyz` | None |
+| `GET` | `/metrics` | None |
 | `GET` | `/v1/models` | Client bearer token |
 | `POST` | `/v1/chat/completions` | Client bearer token |
 
 Other paths return `404`; unsupported methods return `405`.
+`/metrics` uses Prometheus text exposition and is unauthenticated; restrict access at the proxy or network boundary.
 `GATEWAY_CLIENT_TOKENS` maps stable client IDs to unique tokens.
 `SAKURA_AI_ENGINE_ACCOUNT_TOKENS` is a JSON array of unique upstream tokens.
 
@@ -79,10 +81,42 @@ Invalid configuration fails at startup.
 The retry budget must cover configured attempts, backoffs, and a 300-second safety margin; restart the gateway after changing credentials.
 Credentials and request bodies are not logged.
 
+## Prometheus Metrics
+
+`/metrics` is an unauthenticated Prometheus endpoint; protect it at the front proxy.
+
+- `sakura_ai_engine_gateway_chat_completion_requests_total{model}` — accepted chat completion requests, counted once per caller request.
+- `sakura_ai_engine_gateway_upstream_attempts_total{account_slot,model,status_code}` — requests sent to Sakura. Retries count as additional attempts; status `0` means no HTTP response was received. Use this for the console's request count.
+- `sakura_ai_engine_gateway_upstream_retries_scheduled_total{account_slot,model,reason}` — retry decisions before backoff. A scheduled retry may be cancelled before the next upstream attempt.
+- `sakura_ai_engine_gateway_usage_tokens_total{account_slot,model,token_type}` — provider-reported token totals; `token_type` is `input`, `output`, or `total`.
+- `sakura_ai_engine_gateway_usage_responses_total{account_slot,model}` — chat completion responses containing recognized usage fields.
+- `sakura_ai_engine_gateway_usage_incomplete_total{account_slot,model}` — successful responses without both input and output token counts.
+- `sakura_ai_engine_gateway_in_flight_requests` — current authenticated requests holding a concurrency permit.
+- `sakura_ai_engine_gateway_account_cooldown_seconds{account_slot}` — remaining rate-limit cooldown for each upstream account slot.
+- `sakura_ai_engine_gateway_account_rate_limit_streak{account_slot}` — consecutive rate-limit responses for each upstream account slot.
+
+Grafana query examples using the selected time range:
+
+```promql
+sum by (model) (increase(sakura_ai_engine_gateway_upstream_attempts_total{model!="unknown"}[$__range]))
+sum by (model) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown",token_type="input"}[$__range]))
+sum by (model) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown",token_type="output"}[$__range]))
+sum by (account_slot, model, token_type) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown"}[$__range]))
+```
+
+Notes:
+
+- `model` is the requested model ID.
+- `account_slot` is the one-based position in `SAKURA_AI_ENGINE_ACCOUNT_TOKENS`; keep token ordering stable to preserve per-slot history.
+- Credential values, hashes, and client IDs are not labels. Exact model-label collisions use `unknown`.
+- Model names missing from requests or invalid for labels use `unknown`; after 128 distinct names, further names are grouped as `other`.
+- Usage comes only from fields returned by Sakura. Streaming usage is counted only when the upstream response includes it. JSON response observation is limited to 1 MiB and each streaming event to 64 KiB; incomplete responses are counted separately.
+- The gateway does not receive monetary charges from completion responses, so these metrics cannot show cost or backfill usage from before Prometheus began scraping.
+- Metrics and rate-limit cooldowns are process-local and reset on restart. Run a single replica.
+
 Retries happen before response headers are sent; failures after streaming starts are not retried.
 A retry may trigger another completion if Sakura processed the request but its response was lost.
 On timeout retries, `reasoning_effort` values `medium` and `high` are lowered to `low`.
-Rate-limit cooldowns are stored per process, so run a single replica.
 
 ## Development
 
