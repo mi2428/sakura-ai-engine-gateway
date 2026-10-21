@@ -108,3 +108,7 @@ Development
 Help
   help         Show available commands
 ```
+
+## License
+
+[MIT](LICENSE).
