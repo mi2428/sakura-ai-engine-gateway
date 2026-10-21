@@ -27,7 +27,7 @@ const (
 	openWebUIModeHeader    = "X-OpenWebUI-Mode"
 	maxErrorPrefixBytes    = 64 << 10
 	streamBufferBytes      = 32 << 10
-	lowReasoningEvent      = "data: {\"event\":{\"type\":\"status\",\"data\":{\"description\":\"Lowで再試行しました\",\"done\":true}}}\n\n"
+	lowReasoningEvent      = "data: {\"event\":{\"type\":\"status\",\"data\":{\"description\":\"Retried with low reasoning effort\",\"done\":true}}}\n\n"
 	serverIdleTimeout      = 90 * time.Second
 	clientWriteIdleTimeout = 90 * time.Second
 	upstreamKeepAlive      = 30 * time.Second

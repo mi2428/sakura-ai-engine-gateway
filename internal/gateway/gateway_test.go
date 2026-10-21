@@ -386,7 +386,7 @@ func TestGatewayDowngradesReasoningBeforeStreamingRetry(t *testing.T) {
 	if response.Header.Get("Content-Length") != "" {
 		t.Fatalf("injected SSE event retained Content-Length %q", response.Header.Get("Content-Length"))
 	}
-	if !strings.Contains(string(response.Body), `"description":"Lowで再試行しました"`) || !strings.Contains(string(response.Body), `"content":"ok"`) {
+	if !strings.Contains(string(response.Body), `"description":"Retried with low reasoning effort"`) || !strings.Contains(string(response.Body), `"content":"ok"`) {
 		t.Fatalf("stream body omitted retry status or provider data: %s", response.Body)
 	}
 	if response.Header.Get("X-Sakura-Effective-Reasoning-Effort") != "low" {
