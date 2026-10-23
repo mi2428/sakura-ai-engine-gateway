@@ -1,4 +1,4 @@
-# Sakura AI Engine Gateway and Search Tool
+# Sakura AI Engine Gateway
 
 An OpenAI-compatible chat gateway for Sakura AI Engine, with an optional multi-provider web search service.
 
@@ -13,7 +13,6 @@ Chat completions can stream; request size, concurrency, retry, and upstream idle
 The Search Tool provides authenticated `POST /search` requests and normalizes Brave, Tavily, Exa, Firecrawl, and Parallel results to `title`, `link`, and `snippet`.
 Requests rotate through providers and fall back on timeouts, HTTP 408, HTTP 429, or HTTP 5xx; other provider errors fail closed.
 HTTP 429 applies a provider cooldown using `Retry-After` (60 seconds by default, capped at one hour), and queries over 500 characters skip Firecrawl.
-DDGS is not bundled; callers may run their own fallback before invoking the Search Tool.
 
 ## Getting Started
 
