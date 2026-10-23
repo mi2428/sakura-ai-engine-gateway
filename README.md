@@ -2,11 +2,10 @@
 
 An OpenAI-compatible chat gateway for Sakura AI Engine.
 
-The Gateway exposes `GET /v1/models` and `POST /v1/chat/completions`, authenticated with client-specific bearer tokens. Upstream requests rotate across configured Sakura account tokens, with retries and per-account cooldowns for transient failures and rate limits.
-
-Chat completions can stream. Request size, concurrency, retry, and upstream idle limits are configurable, and `/metrics` reports attempts, token usage, retries, cooldowns, and in-flight requests.
-
 ## Getting Started
+
+The Gateway exposes `GET /v1/models` and `POST /v1/chat/completions`, authenticated with client-specific bearer tokens.
+Upstream requests rotate across configured Sakura account tokens, with retries and per-account cooldowns for transient failures and rate limits.
 
 ### Kubernetes (recommended)
 
@@ -22,7 +21,6 @@ In-progress requests can be interrupted during upgrades.
 ### Docker Compose
 
 Use the `.env` file configured above.
-Start the Gateway:
 
 ```console
 $ docker compose up --build -d gateway
@@ -40,8 +38,6 @@ The service publishes its host port on loopback only.
 ## Configuration
 
 Copy `.env.example` to `.env` and replace every `replace-with-*` value.
-
-### Gateway
 
 | Variable | Default / requirement | Description |
 | --- | --- | --- |
@@ -65,12 +61,12 @@ Credentials are read once at startup; restart the Gateway after changing them.
 
 ## HTTP API
 
-| Service | Method | Path | Authentication |
-| --- | --- | --- | --- |
-| Gateway | `GET` | `/health`, `/readyz` | None |
-| Gateway | `GET` | `/metrics` | None |
-| Gateway | `GET` | `/v1/models` | Client bearer token |
-| Gateway | `POST` | `/v1/chat/completions` | Client bearer token |
+| Method | Path | Authentication |
+| --- | --- | --- |
+| `GET` | `/health`, `/readyz` | None |
+| `GET` | `/metrics` | None |
+| `GET` | `/v1/models` | Client bearer token |
+| `POST` | `/v1/chat/completions` | Client bearer token |
 
 Invalid paths return `404`; unsupported methods return `405`.
 
