@@ -191,6 +191,36 @@ func TestGatewayAllowsOnlyModelsAndChatCompletions(t *testing.T) {
 	}
 }
 
+func TestKimiReasoningDefaultPreservesCallerOverrides(t *testing.T) {
+	tests := []struct {
+		name, body, want string
+	}{
+		{"omitted", `{"model":"preview/Kimi-K2.7-Code","messages":[{"role":"user","content":"test"}]}`, `{"model":"preview/Kimi-K2.7-Code","messages":[{"role":"user","content":"test"}],"reasoning_effort":"max"}`},
+		{"nested only", `{"model":"preview/Kimi-K2.7-Code","messages":[{"role":"user","content":"reasoning_effort: low"}]}`, `{"model":"preview/Kimi-K2.7-Code","messages":[{"role":"user","content":"reasoning_effort: low"}],"reasoning_effort":"max"}`},
+		{"whitespace", " {\"model\":\"preview/Kimi-K2.7-Code\"} \n", `{"model":"preview/Kimi-K2.7-Code","reasoning_effort":"max"}`},
+		{"explicit low", `{"model":"preview/Kimi-K2.7-Code","reasoning_effort":"low"}`, `{"model":"preview/Kimi-K2.7-Code","reasoning_effort":"low"}`},
+		{"explicit null", `{"model":"preview/Kimi-K2.7-Code","reasoning_effort":null}`, `{"model":"preview/Kimi-K2.7-Code","reasoning_effort":null}`},
+		{"another model", `{"model":"preview/Kimi-K2.6"}`, `{"model":"preview/Kimi-K2.6"}`},
+		{"malformed", `{"model":"preview/Kimi-K2.7-Code"`, `{"model":"preview/Kimi-K2.7-Code"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil || string(body) != test.want {
+					t.Errorf("upstream body = %q, error = %v; want %q", body, err, test.want)
+				}
+				_, _ = io.WriteString(writer, `{"ok":true}`)
+			})
+			server, _ := startTestGateway(t, testConfig(nil), upstream)
+			response := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", strings.Repeat("h", 32), strings.NewReader(test.body), nil)
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d", response.StatusCode)
+			}
+		})
+	}
+}
+
 func TestGatewayRotatesRateLimitedAccountAndPreservesCallerIdentity(t *testing.T) {
 	var attempts atomic.Int32
 	var accountHeaders []string

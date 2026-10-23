@@ -6,6 +6,7 @@ An OpenAI-compatible chat gateway for Sakura AI Engine.
 
 The Gateway exposes `GET /v1/models` and `POST /v1/chat/completions`, authenticated with client-specific bearer tokens.
 Upstream requests rotate across configured Sakura account tokens, with retries and per-account cooldowns for transient failures and rate limits.
+For `preview/Kimi-K2.7-Code` chat completions, it supplies `reasoning_effort: max` only when the caller omits that field. Explicit values, including `null`, and other models are passed through unchanged. This centralizes the model default for Open WebUI, OpenCode, and Hermes without rewriting their messages or managing their tools. Clients still own search, verification, and delegation; high effort alone cannot verify current facts and may increase latency and token usage.
 
 ### Kubernetes (recommended)
 

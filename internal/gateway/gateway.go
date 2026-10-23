@@ -201,9 +201,14 @@ func (gateway *Gateway) authenticate(header string) (string, bool) {
 }
 
 func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request, body []byte, clientID, requestID string) {
-	model := gateway.metricModel(requestModel(body))
+	modelID, hasEffort := requestModel(body)
+	model := gateway.metricModel(modelID)
 	if request.URL.Path == "/v1/chat/completions" {
 		gateway.metrics.recordChatRequest(model)
+		if modelID == "preview/Kimi-K2.7-Code" && !hasEffort {
+			trimmed := bytes.TrimSpace(body)
+			body = append(trimmed[:len(trimmed)-1], `,"reasoning_effort":"max"}`...)
+		}
 	}
 	deadline := time.Now().Add(gateway.config.RetryBudget)
 	requestBody := body
@@ -737,14 +742,15 @@ func supportedAPIMethod(path string) (string, bool) {
 	}
 }
 
-func requestModel(body []byte) string {
+func requestModel(body []byte) (string, bool) {
 	var request struct {
-		Model string `json:"model"`
+		Model           string          `json:"model"`
+		ReasoningEffort json.RawMessage `json:"reasoning_effort"`
 	}
 	if json.Unmarshal(body, &request) != nil {
-		return ""
+		return "", false
 	}
-	return request.Model
+	return request.Model, request.ReasoningEffort != nil
 }
 
 func (gateway *Gateway) metricModel(value string) string {
