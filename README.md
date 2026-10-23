@@ -1,30 +1,22 @@
 # Sakura AI Engine Gateway
 
-An OpenAI-compatible chat gateway for Sakura AI Engine, with an optional multi-provider web search service.
+An OpenAI-compatible chat gateway for Sakura AI Engine.
 
-### Gateway
+The Gateway exposes `GET /v1/models` and `POST /v1/chat/completions`, authenticated with client-specific bearer tokens. Upstream requests rotate across configured Sakura account tokens, with retries and per-account cooldowns for transient failures and rate limits.
 
-The Gateway exposes OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions` endpoints, authenticated with client-specific bearer tokens.
-Upstream requests rotate across configured Sakura account tokens, with retries and per-account cooldowns for transient failures and rate limits.
-Chat completions can stream; request size, concurrency, retry, and upstream idle limits are configurable, and `/metrics` reports attempts, token usage, retries, cooldowns, and in-flight requests.
-
-### Search Tool
-
-The Search Tool provides authenticated `POST /search` requests and normalizes Brave, Tavily, Exa, Firecrawl, and Parallel results to `title`, `link`, and `snippet`.
-Requests rotate through providers and fall back on timeouts, HTTP 408, HTTP 429, or HTTP 5xx; other provider errors fail closed.
-HTTP 429 applies a provider cooldown using `Retry-After` (60 seconds by default, capped at one hour), and queries over 500 characters skip Firecrawl.
+Chat completions can stream. Request size, concurrency, retry, and upstream idle limits are configurable, and `/metrics` reports attempts, token usage, retries, cooldowns, and in-flight requests.
 
 ## Getting Started
 
 ### Kubernetes (recommended)
 
-[`k8s/base/`](k8s/base) contains separate Deployments and ClusterIP Services.
-Create a `sakura-ai-engine-gateway-credentials` Secret for the Gateway and a `searchtool-credentials` Secret with the Search Tool credential keys from the tables above.
-The `:must-pin` image references are unpublished placeholders; the consuming overlay must replace them with immutable image digests and provide an environment-specific ingress.
+[`k8s/base/`](k8s/base) contains a Deployment and ClusterIP Service.
+Create a `sakura-ai-engine-gateway-credentials` Secret with the credentials listed below.
+The `:must-pin` image reference is an unpublished placeholder; the consuming overlay must replace it with an immutable image digest and provide an environment-specific ingress.
 Keep credentials outside Kustomize, restrict ingress to intended clients, and do not use a public LoadBalancer.
 
-The Gateway requests 2 GiB and is limited to 6 GiB; the Search Tool requests 64 MiB and is limited to 256 MiB.
-Each Deployment uses one replica with the `Recreate` strategy because cooldown state is process-local.
+The Gateway requests 2 GiB and is limited to 6 GiB.
+The Deployment uses one replica with the `Recreate` strategy because cooldown state is process-local.
 In-progress requests can be interrupted during upgrades.
 
 ### Docker Compose
@@ -42,26 +34,12 @@ $ curl --fail http://127.0.0.1:38082/v1/chat/completions \
     -d '{"model":"<model-id>","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-Start the Search Tool:
-
-```console
-$ docker compose --profile searchtool up --build -d searchtool
-$ curl --fail http://127.0.0.1:38083/health
-$ curl --fail http://127.0.0.1:38083/search \
-    -H 'Authorization: Bearer <searchtool-client-token>' \
-    -H 'Content-Type: application/json' \
-    -d '{"query":"example search","count":5}'
-```
-
-Stop the Compose project with `docker compose --profile searchtool down`.
-Both services publish host ports on loopback only.
-Both services use one image; Compose runs `/gateway` by default and selects `/searchtool` for the Search Tool.
+Stop the Compose project with `docker compose down`.
+The service publishes its host port on loopback only.
 
 ## Configuration
 
 Copy `.env.example` to `.env` and replace every `replace-with-*` value.
-Compose interpolates the required Gateway variables even when only the `searchtool` profile is enabled.
-Keep the non-empty Gateway placeholders in `.env` when running the Search Tool alone; the Gateway container will not start.
 
 ### Gateway
 
@@ -82,21 +60,8 @@ Keep the non-empty Gateway placeholders in `.env` when running the Search Tool a
 | `SAKURA_RETRY_MAX_INTERVAL` | `120s` | Retry backoff cap; provider `Retry-After` is honored |
 | `SAKURA_UPSTREAM_IDLE_TIMEOUT` | `420s` | Maximum upstream I/O inactivity |
 
-### Search Tool
-
-| Variable | Default / requirement | Description |
-| --- | --- | --- |
-| `SEARCHTOOL_BRAVE_API_KEY` | Required | Brave Search API key |
-| `SEARCHTOOL_CLIENT_TOKEN` | Required | Bearer token of at least 32 bytes |
-| `SEARCHTOOL_EXA_API_KEY` | Required | Exa API key |
-| `SEARCHTOOL_FIRECRAWL_API_KEY` | Required | Firecrawl API key |
-| `SEARCHTOOL_LISTEN_ADDRESS` | `:8081` | HTTP listen address |
-| `SEARCHTOOL_LOCAL_PORT` | `38083` | Docker Compose host port |
-| `SEARCHTOOL_PARALLEL_API_KEY` | Required | Parallel API key |
-| `SEARCHTOOL_TAVILY_API_KEY` | Required | Tavily API key |
-
 The retry budget must cover configured attempts, backoffs, and a 300-second safety margin.
-Credentials are read once at startup; restart the corresponding service after changing them.
+Credentials are read once at startup; restart the Gateway after changing them.
 
 ## HTTP API
 
@@ -106,12 +71,7 @@ Credentials are read once at startup; restart the corresponding service after ch
 | Gateway | `GET` | `/metrics` | None |
 | Gateway | `GET` | `/v1/models` | Client bearer token |
 | Gateway | `POST` | `/v1/chat/completions` | Client bearer token |
-| Search Tool | `GET` | `/health`, `/readyz` | None |
-| Search Tool | `POST` | `/search` | Search Tool bearer token |
 
-`POST /search` accepts `{"query":"...","count":5}`.
-Queries are limited to 2048 bytes; count defaults to 5 and is limited to 20.
-The response is `{"results":[{"title":"...","link":"https://...","snippet":"..."}]}`.
 Invalid paths return `404`; unsupported methods return `405`.
 
 ## Metrics
@@ -141,9 +101,9 @@ Quality
   fmt          Format Go source
 
 Development
-  build        Build all cmd/*/main.go packages by default; use CMD=searchtool to select
-  image        Build the shared Gateway and Search Tool image
-  dev          Start the Gateway by default (requires .env; use CMD=searchtool)
+  build        Build the Gateway
+  image        Build the Gateway image
+  dev          Start the Gateway (requires .env)
   down         Stop local Compose services
 
 Help

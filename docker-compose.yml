@@ -23,28 +23,3 @@ services:
     mem_limit: 6g
     stop_grace_period: 40s
     restart: on-failure
-  searchtool:
-    profiles: [searchtool]
-    image: sakura-ai-engine-gateway:dev
-    build:
-      context: .
-      dockerfile: Dockerfile
-    command: ["/searchtool"]
-    environment:
-      SEARCHTOOL_LISTEN_ADDRESS: ":8081"
-      SEARCHTOOL_CLIENT_TOKEN: "${SEARCHTOOL_CLIENT_TOKEN:?copy .env.example to .env and configure SEARCHTOOL_CLIENT_TOKEN}"
-      SEARCHTOOL_BRAVE_API_KEY: "${SEARCHTOOL_BRAVE_API_KEY:?copy .env.example to .env and configure SEARCHTOOL_BRAVE_API_KEY}"
-      SEARCHTOOL_TAVILY_API_KEY: "${SEARCHTOOL_TAVILY_API_KEY:?copy .env.example to .env and configure SEARCHTOOL_TAVILY_API_KEY}"
-      SEARCHTOOL_EXA_API_KEY: "${SEARCHTOOL_EXA_API_KEY:?copy .env.example to .env and configure SEARCHTOOL_EXA_API_KEY}"
-      SEARCHTOOL_FIRECRAWL_API_KEY: "${SEARCHTOOL_FIRECRAWL_API_KEY:?copy .env.example to .env and configure SEARCHTOOL_FIRECRAWL_API_KEY}"
-      SEARCHTOOL_PARALLEL_API_KEY: "${SEARCHTOOL_PARALLEL_API_KEY:?copy .env.example to .env and configure SEARCHTOOL_PARALLEL_API_KEY}"
-    ports:
-      - "127.0.0.1:${SEARCHTOOL_LOCAL_PORT:-38083}:8081"
-    read_only: true
-    user: "65532:65532"
-    cap_drop: [ALL]
-    security_opt:
-      - no-new-privileges:true
-    mem_reservation: 64m
-    mem_limit: 256m
-    restart: on-failure
