@@ -1,118 +1,137 @@
-# Sakura AI Engine Gateway
+# Sakura AI Engine Gateway and Search Tool
 
-A Sakura AI Engine gateway that exposes OpenAI-compatible `/v1/models` and `/v1/chat/completions` endpoints.
-Clients use their own tokens; the gateway rotates configured Sakura account tokens upstream.
+An OpenAI-compatible chat gateway for Sakura AI Engine, with an optional multi-provider web search service.
+
+### Gateway
+
+The Gateway exposes OpenAI-compatible `GET /v1/models` and `POST /v1/chat/completions` endpoints, authenticated with client-specific bearer tokens.
+Upstream requests rotate across configured Sakura account tokens, with retries and per-account cooldowns for transient failures and rate limits.
+Chat completions can stream; request size, concurrency, retry, and upstream idle limits are configurable, and `/metrics` reports attempts, token usage, retries, cooldowns, and in-flight requests.
+
+### Search Tool
+
+The Search Tool provides authenticated `POST /search` requests and normalizes Brave, Tavily, Exa, Firecrawl, and Parallel results to `title`, `link`, and `snippet`.
+Requests rotate through providers and fall back on timeouts, HTTP 408, HTTP 429, or HTTP 5xx; other provider errors fail closed.
+HTTP 429 applies a provider cooldown using `Retry-After` (60 seconds by default, capped at one hour), and queries over 500 characters skip Firecrawl.
+DDGS is not bundled; callers may run their own fallback before invoking the Search Tool.
 
 ## Getting Started
 
 ### Kubernetes (recommended)
 
-[`k8s/base/`](k8s/base) provides a Deployment and ClusterIP Service.
-Before deployment, provision a Secret named `sakura-ai-engine-gateway-credentials` in the target namespace with the two required credential keys.
-The consuming overlay must pin the source commit and image digest, and provide an environment-specific ingress.
+[`k8s/base/`](k8s/base) contains separate Deployments and ClusterIP Services.
+Create a `sakura-ai-engine-gateway-credentials` Secret for the Gateway and a `searchtool-credentials` Secret with the Search Tool credential keys from the tables above.
+The `:must-pin` image references are unpublished placeholders; the consuming overlay must replace them with immutable image digests and provide an environment-specific ingress.
+Keep credentials outside Kustomize, restrict ingress to intended clients, and do not use a public LoadBalancer.
 
-> [!IMPORTANT]
-> The base's `:must-pin` image tag is not published; replace it with an immutable digest.
-> Keep credentials outside Kustomize, and expose the Service only through an ingress that restricts access to intended clients.
-> Do not expose the Service as a public LoadBalancer.
-
-The base requests 2 GiB and limits the container to 6 GiB.
-The default limits allow up to 1.5 GiB of request bodies across 24 concurrent requests, before runtime overhead.
-The Deployment runs one replica with the `Recreate` strategy because cooldown state is process-local.
-In-progress streams can be interrupted during upgrades.
+The Gateway requests 2 GiB and is limited to 6 GiB; the Search Tool requests 64 MiB and is limited to 256 MiB.
+Each Deployment uses one replica with the `Recreate` strategy because cooldown state is process-local.
+In-progress requests can be interrupted during upgrades.
 
 ### Docker Compose
 
-Requires Docker Compose and a Sakura account token.
-Copy `.env.example` to `.env`, set `SAKURA_AI_ENGINE_ACCOUNT_TOKENS` to a JSON array of upstream tokens, and configure `GATEWAY_CLIENT_TOKENS` with a local client token.
-The sample `local` client token is public; use it for local testing only.
-
-> [!IMPORTANT]
-> Do not commit a populated `.env`.
-> For deployed clients, generate a unique random token of at least 32 bytes for each client and store both credential values in a secret manager.
+Use the `.env` file configured above.
+Start the Gateway:
 
 ```console
-$ cp .env.example .env  # Set the Sakura account token and a local client token in .env.
-$ docker compose up --build -d
+$ docker compose up --build -d gateway
 $ curl --fail http://127.0.0.1:38082/health
 $ curl --fail -H 'Authorization: Bearer <client-token>' http://127.0.0.1:38082/v1/models
 $ curl --fail http://127.0.0.1:38082/v1/chat/completions \
     -H 'Authorization: Bearer <client-token>' \
     -H 'Content-Type: application/json' \
     -d '{"model":"<model-id>","messages":[{"role":"user","content":"Hello"}]}'
-$ make down
 ```
 
-Replace `<client-token>` with the token configured in `.env` and `<model-id>` with an ID returned by `/v1/models`.
-The host port is published on loopback only.
+Start the Search Tool:
 
-## API and Configuration
+```console
+$ docker compose --profile searchtool up --build -d searchtool
+$ curl --fail http://127.0.0.1:38083/health
+$ curl --fail http://127.0.0.1:38083/search \
+    -H 'Authorization: Bearer <searchtool-client-token>' \
+    -H 'Content-Type: application/json' \
+    -d '{"query":"example search","count":5}'
+```
 
-| Method | Path | Authentication |
+Stop the Compose project with `docker compose --profile searchtool down`.
+Both services publish host ports on loopback only.
+
+## Configuration
+
+Copy `.env.example` to `.env` and replace every `replace-with-*` value.
+Compose interpolates the required Gateway variables even when only the `searchtool` profile is enabled.
+Keep the non-empty Gateway placeholders in `.env` when running the Search Tool alone; the Gateway container will not start.
+
+### Gateway
+
+| Variable | Default / requirement | Description |
 | --- | --- | --- |
-| `GET` | `/health`, `/readyz` | None |
-| `GET` | `/metrics` | None |
-| `GET` | `/v1/models` | Client bearer token |
-| `POST` | `/v1/chat/completions` | Client bearer token |
-
-Other paths return `404`; unsupported methods return `405`.
-`/metrics` uses Prometheus text exposition and is unauthenticated; restrict access at the proxy or network boundary.
-`GATEWAY_CLIENT_TOKENS` maps stable client IDs to unique tokens.
-`SAKURA_AI_ENGINE_ACCOUNT_TOKENS` is a JSON array of unique upstream tokens.
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `SAKURA_AI_ENGINE_ACCOUNT_TOKENS` | Required | JSON array of Sakura account tokens |
-| `GATEWAY_CLIENT_TOKENS` | Required | JSON object of client IDs to unique bearer tokens (at least 32 bytes each) |
+| `GATEWAY_CLIENT_TOKENS` | Required | JSON object of client IDs to unique bearer tokens of at least 32 bytes |
 | `GATEWAY_LISTEN_ADDRESS` | `:8080` | HTTP listen address |
-| `SAKURA_AI_ENGINE_API_URL` | `https://api.ai.sakura.ad.jp` | Upstream HTTP(S) origin; no credentials, path, query, or fragment |
-| `GATEWAY_MAX_REQUEST_BYTES` | `67108864` | Maximum request body (64 MiB) |
+| `GATEWAY_LOCAL_PORT` | `38082` | Docker Compose host port |
 | `GATEWAY_MAX_CONCURRENT_REQUESTS` | `24` | Maximum requests per process |
-| `GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT` | `24` | Maximum requests per client; cannot exceed the global limit |
-| `SAKURA_RETRY_MAX` | `5` | Retries after the first attempt |
-| `SAKURA_RETRY_BASE_INTERVAL` | `10s` | Initial backoff |
-| `SAKURA_RETRY_MAX_INTERVAL` | `120s` | Backoff cap; provider `Retry-After` is honored |
+| `GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT` | `24` | Maximum requests per client; must not exceed the global limit |
+| `GATEWAY_MAX_REQUEST_BYTES` | `67108864` | Maximum request body (64 MiB) |
+| `SAKURA_AI_ENGINE_ACCOUNT_TOKENS` | Required | JSON array of unique Sakura account tokens |
+| `SAKURA_AI_ENGINE_API_URL` | `https://api.ai.sakura.ad.jp` | Upstream HTTP(S) origin without credentials, path, query, or fragment |
+| `SAKURA_RETRY_BASE_INTERVAL` | `10s` | Initial retry backoff |
+| `SAKURA_RETRY_BUDGET` | `3200s` | Retry budget before streaming starts |
 | `SAKURA_RETRY_JITTER` | `1s` | Positive retry jitter |
-| `SAKURA_RETRY_BUDGET` | `3200s` | Retry time before streaming starts; active streams are not limited by this budget |
+| `SAKURA_RETRY_MAX` | `5` | Retries after the first attempt |
+| `SAKURA_RETRY_MAX_INTERVAL` | `120s` | Retry backoff cap; provider `Retry-After` is honored |
 | `SAKURA_UPSTREAM_IDLE_TIMEOUT` | `420s` | Maximum upstream I/O inactivity |
-| `GATEWAY_LOCAL_PORT` | `38082` | Host port for Docker Compose only |
 
-Invalid configuration fails at startup.
-The retry budget must cover configured attempts, backoffs, and a 300-second safety margin; restart the gateway after changing credentials.
-Credentials and request bodies are not logged.
+### Search Tool
 
-## Prometheus Metrics
+| Variable | Default / requirement | Description |
+| --- | --- | --- |
+| `SEARCHTOOL_BRAVE_API_KEY` | Required | Brave Search API key |
+| `SEARCHTOOL_CLIENT_TOKEN` | Required | Bearer token of at least 32 bytes |
+| `SEARCHTOOL_EXA_API_KEY` | Required | Exa API key |
+| `SEARCHTOOL_FIRECRAWL_API_KEY` | Required | Firecrawl API key |
+| `SEARCHTOOL_LISTEN_ADDRESS` | `:8081` | HTTP listen address |
+| `SEARCHTOOL_LOCAL_PORT` | `38083` | Docker Compose host port |
+| `SEARCHTOOL_PARALLEL_API_KEY` | Required | Parallel API key |
+| `SEARCHTOOL_TAVILY_API_KEY` | Required | Tavily API key |
 
-`/metrics` is an unauthenticated Prometheus endpoint; protect it at the front proxy.
+The retry budget must cover configured attempts, backoffs, and a 300-second safety margin.
+Credentials are read once at startup; restart the corresponding service after changing them.
 
-- `sakura_ai_engine_gateway_chat_completion_requests_total{model}` — accepted chat completion requests, counted once per caller request.
-- `sakura_ai_engine_gateway_upstream_attempts_total{account_slot,model,status_code}` — requests sent to Sakura. Retries count as additional attempts; status `0` means no HTTP response was received. Use this for the console's request count.
-- `sakura_ai_engine_gateway_upstream_retries_scheduled_total{account_slot,model,reason}` — retry decisions before backoff. A scheduled retry may be cancelled before the next upstream attempt.
-- `sakura_ai_engine_gateway_usage_tokens_total{account_slot,model,token_type}` — provider-reported token totals; `token_type` is `input`, `output`, or `total`.
-- `sakura_ai_engine_gateway_usage_responses_total{account_slot,model}` — chat completion responses containing recognized usage fields.
-- `sakura_ai_engine_gateway_usage_incomplete_total{account_slot,model}` — successful responses without both input and output token counts.
-- `sakura_ai_engine_gateway_in_flight_requests` — current authenticated requests holding a concurrency permit.
-- `sakura_ai_engine_gateway_account_cooldown_seconds{account_slot}` — remaining rate-limit cooldown for each upstream account slot.
-- `sakura_ai_engine_gateway_account_rate_limit_streak{account_slot}` — consecutive rate-limit responses for each upstream account slot.
+## HTTP API
 
-Grafana query examples using the selected time range:
+| Service | Method | Path | Authentication |
+| --- | --- | --- | --- |
+| Gateway | `GET` | `/health`, `/readyz` | None |
+| Gateway | `GET` | `/metrics` | None |
+| Gateway | `GET` | `/v1/models` | Client bearer token |
+| Gateway | `POST` | `/v1/chat/completions` | Client bearer token |
+| Search Tool | `GET` | `/health`, `/readyz` | None |
+| Search Tool | `POST` | `/search` | Search Tool bearer token |
 
-```promql
-sum by (model) (increase(sakura_ai_engine_gateway_upstream_attempts_total{model!="unknown"}[$__range]))
-sum by (model) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown",token_type="input"}[$__range]))
-sum by (model) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown",token_type="output"}[$__range]))
-sum by (account_slot, model, token_type) (increase(sakura_ai_engine_gateway_usage_tokens_total{model!="unknown"}[$__range]))
-```
+`POST /search` accepts `{"query":"...","count":5}`.
+Queries are limited to 2048 bytes; count defaults to 5 and is limited to 20.
+The response is `{"results":[{"title":"...","link":"https://...","snippet":"..."}]}`.
+Invalid paths return `404`; unsupported methods return `405`.
+
+## Metrics
+
+The Gateway `/metrics` endpoint uses Prometheus text exposition and is unauthenticated.
+Restrict it at the proxy or network boundary.
+
+- `sakura_ai_engine_gateway_chat_completion_requests_total{model}` — Accepted chat completion requests.
+- `sakura_ai_engine_gateway_upstream_attempts_total{account_slot,model,status_code}` — Requests sent to Sakura; retries count as additional attempts.
+- `sakura_ai_engine_gateway_upstream_retries_scheduled_total{account_slot,model,reason}` — Retry decisions before backoff.
+- `sakura_ai_engine_gateway_usage_tokens_total{account_slot,model,token_type}` — Provider-reported input, output, or total tokens.
+- `sakura_ai_engine_gateway_usage_responses_total{account_slot,model}` — Responses containing recognized usage fields.
+- `sakura_ai_engine_gateway_usage_incomplete_total{account_slot,model}` — Successful responses missing input or output usage.
+- `sakura_ai_engine_gateway_in_flight_requests` — Authenticated requests holding a concurrency permit.
+- `sakura_ai_engine_gateway_account_cooldown_seconds{account_slot}` — Remaining account cooldown.
+- `sakura_ai_engine_gateway_account_rate_limit_streak{account_slot}` — Consecutive rate-limit responses by account.
 
 ## Development
 
-To run `make check`, install Go, `golangci-lint`, Hadolint, Yamllint, Kubeconform, Docker Compose, and `kubectl`:
-
-```console
-$ make check build
-```
-
-The default `make` target prints the available targets:
+Run `make help` to list available checks and build targets.
 
 ```console
 $ make
@@ -122,10 +141,10 @@ Quality
   fmt          Format Go source
 
 Development
-  build        Build the local Go binary
-  image        Build the local Docker image
-  dev          Start the local gateway (requires a configured .env)
-  down         Stop the local gateway
+  build        Build all cmd/*/main.go packages by default; use CMD=searchtool to select
+  image        Build all Docker images by default; use CMD=searchtool to select
+  dev          Start the Gateway by default (requires .env; use CMD=searchtool)
+  down         Stop local Compose services
 
 Help
   help         Show available commands
