@@ -21,9 +21,9 @@ fmt: ## Format Go source
 
 ##@ Development
 
-build: ## Build the local Go binary
+build: ## Build all Go commands into build/
 	mkdir -p build
-	go build -trimpath -o build/gateway ./cmd/gateway
+	go build -trimpath -o build/ ./cmd/...
 
 image: ## Build the local Docker image
 	$(COMPOSE) --env-file .env.example build

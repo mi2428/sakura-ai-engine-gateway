@@ -7,3 +7,5 @@ coverage.html
 build
 internal/gateway/*_test.go
 cmd/gateway/*_test.go
+internal/search/*_test.go
+cmd/searchtool/*_test.go
