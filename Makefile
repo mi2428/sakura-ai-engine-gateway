@@ -11,7 +11,7 @@ check: ## Run Go tests, static checks, container and Kubernetes validation
 	go vet ./...
 	go test -race -count=1 ./...
 	golangci-lint run ./...
-	hadolint Dockerfile
+	hadolint docker/gateway/Dockerfile
 	yamllint -d '{extends: relaxed, rules: {line-length: disable}}' docker-compose.yml k8s/base
 	$(COMPOSE) --env-file .env.example config --quiet
 	bash -o pipefail -c 'kubectl kustomize k8s/base | kubeconform -strict -summary'
@@ -23,7 +23,7 @@ fmt: ## Format Go source
 
 build: ## Build the local Go binary
 	mkdir -p build
-	go build -trimpath -o build/sakura-ai-engine-gateway ./cmd/sakura-ai-engine-gateway
+	go build -trimpath -o build/gateway ./cmd/gateway
 
 image: ## Build the local Docker image
 	$(COMPOSE) --env-file .env.example build

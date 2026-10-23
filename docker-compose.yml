@@ -3,7 +3,7 @@ services:
     image: sakura-ai-engine-gateway:dev
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: docker/gateway/Dockerfile
     environment:
       GATEWAY_LISTEN_ADDRESS: ":8080"
       SAKURA_AI_ENGINE_API_URL: "${SAKURA_AI_ENGINE_API_URL:-https://api.ai.sakura.ad.jp}"

@@ -6,4 +6,4 @@ coverage.out
 coverage.html
 build
 internal/gateway/*_test.go
-cmd/sakura-ai-engine-gateway/*_test.go
+cmd/gateway/*_test.go
