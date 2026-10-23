@@ -56,6 +56,7 @@ $ curl --fail http://127.0.0.1:38083/search \
 
 Stop the Compose project with `docker compose --profile searchtool down`.
 Both services publish host ports on loopback only.
+Both services use one image; Compose runs `/gateway` by default and selects `/searchtool` for the Search Tool.
 
 ## Configuration
 
@@ -142,7 +143,7 @@ Quality
 
 Development
   build        Build all cmd/*/main.go packages by default; use CMD=searchtool to select
-  image        Build all Docker images by default; use CMD=searchtool to select
+  image        Build the shared Gateway and Search Tool image
   dev          Start the Gateway by default (requires .env; use CMD=searchtool)
   down         Stop local Compose services
 

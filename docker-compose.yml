@@ -3,7 +3,7 @@ services:
     image: sakura-ai-engine-gateway:dev
     build:
       context: .
-      dockerfile: docker/gateway/Dockerfile
+      dockerfile: Dockerfile
     environment:
       GATEWAY_LISTEN_ADDRESS: ":8080"
       SAKURA_AI_ENGINE_API_URL: "${SAKURA_AI_ENGINE_API_URL:-https://api.ai.sakura.ad.jp}"
@@ -25,10 +25,11 @@ services:
     restart: on-failure
   searchtool:
     profiles: [searchtool]
-    image: searchtool:dev
+    image: sakura-ai-engine-gateway:dev
     build:
       context: .
-      dockerfile: docker/searchtool/Dockerfile
+      dockerfile: Dockerfile
+    command: ["/searchtool"]
     environment:
       SEARCHTOOL_LISTEN_ADDRESS: ":8081"
       SEARCHTOOL_CLIENT_TOKEN: "${SEARCHTOOL_CLIENT_TOKEN:?copy .env.example to .env and configure SEARCHTOOL_CLIENT_TOKEN}"

@@ -20,7 +20,7 @@ check: ## Run Go tests, static checks, container and Kubernetes validation
 	go vet ./...
 	go test -race -count=1 ./...
 	golangci-lint run ./...
-	hadolint docker/gateway/Dockerfile docker/searchtool/Dockerfile
+	hadolint Dockerfile
 	yamllint -d '{extends: relaxed, rules: {line-length: disable}}' docker-compose.yml k8s/base
 	$(COMPOSE) --env-file .env.example config --quiet
 	bash -o pipefail -c 'kubectl kustomize k8s/base | kubeconform -strict -summary'
@@ -35,9 +35,8 @@ build: ## Build all cmd/*/main.go packages by default; use CMD=searchtool to sel
 	mkdir -p build
 	go build -trimpath -o build/ $(foreach cmd,$(CMD_LIST),./cmd/$(cmd))
 
-image: ## Build all Docker images by default; use CMD=searchtool to select
-	@$(validate-cmds)
-	$(COMPOSE) --env-file .env.example $(SEARCHTOOL_PROFILE) build $(COMPOSE_SERVICES)
+image: ## Build the shared Gateway and Search Tool image
+	$(COMPOSE) --env-file .env.example build gateway
 
 dev: CMD = gateway
 dev: ## Start the Gateway by default (requires .env; use CMD=searchtool)

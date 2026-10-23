@@ -3,19 +3,21 @@ FROM --platform=$BUILDPLATFORM golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37a
 
 WORKDIR /src
 COPY go.mod ./
-COPY cmd/searchtool/ ./cmd/searchtool/
-COPY internal/search/ ./internal/search/
+COPY cmd/ ./cmd/
+COPY internal/ ./internal/
 
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+RUN mkdir -p /out && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -trimpath \
     -ldflags="-s -w -buildid=" \
-    -o /out/searchtool \
+    -o /out/ \
+    ./cmd/gateway \
     ./cmd/searchtool
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 
+COPY --from=build /out/gateway /gateway
 COPY --from=build /out/searchtool /searchtool
 
 ARG BUILD_VERSION=dev
@@ -24,5 +26,5 @@ LABEL org.opencontainers.image.source="https://github.com/mi2428/sakura-ai-engin
       org.opencontainers.image.version="${BUILD_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}"
 
-EXPOSE 8081
-ENTRYPOINT ["/searchtool"]
+EXPOSE 8080 8081
+CMD ["/gateway"]
