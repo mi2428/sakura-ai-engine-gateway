@@ -1,5 +1,7 @@
 # Sakura AI Engine Gateway
 
+[![CI](https://github.com/mi2428/sakura-ai-engine-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/mi2428/sakura-ai-engine-gateway/actions/workflows/ci.yml)
+
 An OpenAI-compatible chat gateway for Sakura AI Engine.
 
 ## Getting Started
