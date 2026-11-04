@@ -1,4 +1,4 @@
-// Package gateway implements the authenticated Sakura AI Engine API gateway.
+// Package gateway implements the Sakura AI Engine API gateway.
 package gateway
 
 import (
@@ -8,7 +8,7 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"regexp"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,45 +16,41 @@ import (
 )
 
 const (
-	defaultListenAddress          = ":8080"
-	defaultUpstreamURL            = "https://api.ai.sakura.ad.jp"
-	defaultMaxRequestBytes        = 64 << 20
-	defaultMaxConcurrent          = 24
-	defaultMaxConcurrentPerClient = 24
-	defaultMaxRetries             = 5
-	defaultBaseBackoff            = 10 * time.Second
-	defaultMaxBackoff             = 120 * time.Second
-	defaultJitter                 = time.Second
-	defaultRetryBudget            = 3200 * time.Second
-	defaultUpstreamIdleTimeout    = 420 * time.Second
-	retrySafetyMargin             = 300 * time.Second
-	minimumClientTokenBytes       = 32
-	maximumRetryCount             = 20
-	maximumGatewayConcurrency     = 1024
-	maximumConfiguredClients      = 64
-	maximumRequestBytes           = 256 << 20
-	maximumBufferedRequestBytes   = 1536 << 20 // Requests are buffered for safe replay on retry.
-	maximumConfiguredDuration     = 24 * time.Hour
+	defaultListenAddress       = ":8080"
+	defaultUpstreamURL         = "https://api.ai.sakura.ad.jp"
+	defaultMaxRequestBytes     = 64 << 20
+	defaultMemoryCgroupPath    = "/sys/fs/cgroup"
+	defaultMaxQueuedRequests   = 64
+	defaultQueueTimeout        = time.Minute
+	defaultMaxRetries          = 5
+	defaultBaseBackoff         = 10 * time.Second
+	defaultMaxBackoff          = 120 * time.Second
+	defaultJitter              = time.Second
+	defaultRetryBudget         = 3200 * time.Second
+	defaultUpstreamIdleTimeout = 420 * time.Second
+	retrySafetyMargin          = 300 * time.Second
+	maximumRetryCount          = 20
+	maximumQueuedRequests      = 1024
+	maximumRequestBytes        = 256 << 20
+	maximumConfiguredDuration  = 24 * time.Hour
 )
-
-var clientIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // Config contains validated runtime configuration. Secrets are never formatted
 // into errors or logs.
 type Config struct {
-	ListenAddress          string
-	UpstreamURL            *url.URL
-	AccountTokens          []string
-	ClientTokens           map[string]string
-	MaxRequestBytes        int64
-	MaxConcurrent          int
-	MaxConcurrentPerClient int
-	MaxRetries             int
-	BaseBackoff            time.Duration
-	MaxBackoff             time.Duration
-	Jitter                 time.Duration
-	RetryBudget            time.Duration
-	UpstreamIdleTimeout    time.Duration
+	ListenAddress       string
+	UpstreamURL         *url.URL
+	AccountTokens       []string
+	MaxRequestBytes     int64
+	MemoryCgroupPath    string
+	MaxQueuedRequests   int
+	QueueTimeout        time.Duration
+	MaxRetries          int
+	BaseBackoff         time.Duration
+	MaxBackoff          time.Duration
+	Jitter              time.Duration
+	RetryBudget         time.Duration
+	UpstreamIdleTimeout time.Duration
 }
 
 // LoadConfig reads and validates all configuration from the environment.
@@ -69,20 +65,15 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	clientTokens, err := parseClientTokens(os.Getenv("GATEWAY_CLIENT_TOKENS"))
-	if err != nil {
-		return Config{}, err
-	}
-
 	maxRequestBytes, err := int64Env("GATEWAY_MAX_REQUEST_BYTES", defaultMaxRequestBytes)
 	if err != nil {
 		return Config{}, err
 	}
-	maxConcurrent, err := intEnv("GATEWAY_MAX_CONCURRENT_REQUESTS", defaultMaxConcurrent)
+	maxQueuedRequests, err := intEnv("GATEWAY_MAX_QUEUED_REQUESTS", defaultMaxQueuedRequests)
 	if err != nil {
 		return Config{}, err
 	}
-	maxConcurrentPerClient, err := intEnv("GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT", defaultMaxConcurrentPerClient)
+	queueTimeout, err := durationEnv("GATEWAY_QUEUE_TIMEOUT", defaultQueueTimeout)
 	if err != nil {
 		return Config{}, err
 	}
@@ -112,19 +103,19 @@ func LoadConfig() (Config, error) {
 	}
 
 	config := Config{
-		ListenAddress:          listenAddress,
-		UpstreamURL:            upstreamURL,
-		AccountTokens:          accountTokens,
-		ClientTokens:           clientTokens,
-		MaxRequestBytes:        maxRequestBytes,
-		MaxConcurrent:          maxConcurrent,
-		MaxConcurrentPerClient: maxConcurrentPerClient,
-		MaxRetries:             maxRetries,
-		BaseBackoff:            baseBackoff,
-		MaxBackoff:             maxBackoff,
-		Jitter:                 jitter,
-		RetryBudget:            retryBudget,
-		UpstreamIdleTimeout:    upstreamIdleTimeout,
+		ListenAddress:       listenAddress,
+		UpstreamURL:         upstreamURL,
+		AccountTokens:       accountTokens,
+		MaxRequestBytes:     maxRequestBytes,
+		MemoryCgroupPath:    envOr("GATEWAY_MEMORY_CGROUP_PATH", defaultMemoryCgroupPath),
+		MaxQueuedRequests:   maxQueuedRequests,
+		QueueTimeout:        queueTimeout,
+		MaxRetries:          maxRetries,
+		BaseBackoff:         baseBackoff,
+		MaxBackoff:          maxBackoff,
+		Jitter:              jitter,
+		RetryBudget:         retryBudget,
+		UpstreamIdleTimeout: upstreamIdleTimeout,
 	}
 	if err := config.Validate(); err != nil {
 		return Config{}, err
@@ -146,14 +137,11 @@ func (c Config) Validate() error {
 	if len(c.AccountTokens) == 0 {
 		return errors.New("SAKURA_AI_ENGINE_ACCOUNT_TOKENS must contain at least one token")
 	}
-	if len(c.ClientTokens) == 0 {
-		return errors.New("GATEWAY_CLIENT_TOKENS must contain at least one client token")
+	if !filepath.IsAbs(c.MemoryCgroupPath) {
+		return errors.New("GATEWAY_MEMORY_CGROUP_PATH must be an absolute cgroup v2 directory")
 	}
-	if len(c.ClientTokens) > maximumConfiguredClients {
-		return errors.New("GATEWAY_CLIENT_TOKENS exceeds the supported client count")
-	}
-	if c.MaxRequestBytes <= 0 || c.MaxRequestBytes > maximumRequestBytes || c.MaxConcurrent <= 0 || c.MaxConcurrent > maximumGatewayConcurrency || c.MaxConcurrentPerClient <= 0 || c.MaxConcurrentPerClient > c.MaxConcurrent || c.MaxRequestBytes > maximumBufferedRequestBytes/int64(c.MaxConcurrent) || c.MaxRetries < 0 || c.MaxRetries > maximumRetryCount {
-		return errors.New("gateway request and concurrency limits exceed safe bounds")
+	if c.MaxRequestBytes <= 0 || c.MaxRequestBytes > maximumRequestBytes || c.MaxQueuedRequests <= 0 || c.MaxQueuedRequests > maximumQueuedRequests || c.QueueTimeout <= 0 || c.QueueTimeout > maximumConfiguredDuration || c.MaxRetries < 0 || c.MaxRetries > maximumRetryCount {
+		return errors.New("gateway request and queue limits exceed safe bounds")
 	}
 	if c.BaseBackoff < 0 || c.MaxBackoff < c.BaseBackoff || c.Jitter < 0 || c.RetryBudget <= 0 || c.UpstreamIdleTimeout <= 0 || c.MaxBackoff > maximumConfiguredDuration || c.Jitter > maximumConfiguredDuration || c.RetryBudget > maximumConfiguredDuration || c.UpstreamIdleTimeout > maximumConfiguredDuration {
 		return errors.New("retry and upstream timeout settings are inconsistent")
@@ -167,16 +155,6 @@ func (c Config) Validate() error {
 			return errors.New("SAKURA_AI_ENGINE_ACCOUNT_TOKENS must not contain duplicates")
 		}
 		seenAccounts[token] = struct{}{}
-	}
-	seenClientTokens := make(map[string]struct{}, len(c.ClientTokens))
-	for clientID, token := range c.ClientTokens {
-		if !clientIDPattern.MatchString(clientID) || len(token) < minimumClientTokenBytes || strings.TrimSpace(token) != token || strings.ContainsAny(token, "\r\n\t ") {
-			return errors.New("GATEWAY_CLIENT_TOKENS contains an invalid client ID or token")
-		}
-		if _, exists := seenClientTokens[token]; exists {
-			return errors.New("GATEWAY_CLIENT_TOKENS must use a unique token for each client")
-		}
-		seenClientTokens[token] = struct{}{}
 	}
 	if c.RetryBudget < minimumRetryBudget(c) {
 		return errors.New("SAKURA_RETRY_BUDGET is too short for the configured attempts and backoff")
@@ -225,52 +203,6 @@ func parseAccountTokens(raw string) ([]string, error) {
 			return nil, errors.New("SAKURA_AI_ENGINE_ACCOUNT_TOKENS must not contain duplicates")
 		}
 		seen[token] = struct{}{}
-	}
-	return tokens, nil
-}
-
-func parseClientTokens(raw string) (map[string]string, error) {
-	decoder := json.NewDecoder(strings.NewReader(raw))
-	opening, err := decoder.Token()
-	if err != nil || opening != json.Delim('{') {
-		return nil, errors.New("GATEWAY_CLIENT_TOKENS must be a JSON object of client IDs to tokens")
-	}
-	tokens := make(map[string]string)
-	seenTokens := make(map[string]struct{}, maximumConfiguredClients)
-	for decoder.More() {
-		key, err := decoder.Token()
-		clientID, ok := key.(string)
-		if err != nil || !ok {
-			return nil, errors.New("GATEWAY_CLIENT_TOKENS must use string client IDs")
-		}
-		if _, exists := tokens[clientID]; exists {
-			return nil, errors.New("GATEWAY_CLIENT_TOKENS must not repeat client IDs")
-		}
-		var token string
-		if err := decoder.Decode(&token); err != nil {
-			return nil, errors.New("GATEWAY_CLIENT_TOKENS values must be strings")
-		}
-		if !clientIDPattern.MatchString(clientID) {
-			return nil, fmt.Errorf("GATEWAY_CLIENT_TOKENS contains invalid client ID %q", clientID)
-		}
-		if len(token) < minimumClientTokenBytes {
-			return nil, fmt.Errorf("GATEWAY_CLIENT_TOKENS token for %q must be at least %d bytes", clientID, minimumClientTokenBytes)
-		}
-		if _, exists := seenTokens[token]; exists {
-			return nil, errors.New("GATEWAY_CLIENT_TOKENS must use a unique token for each client")
-		}
-		tokens[clientID] = token
-		seenTokens[token] = struct{}{}
-	}
-	closing, err := decoder.Token()
-	if err != nil || closing != json.Delim('}') {
-		return nil, errors.New("GATEWAY_CLIENT_TOKENS contains an incomplete JSON object")
-	}
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return nil, errors.New("GATEWAY_CLIENT_TOKENS must contain exactly one JSON object")
-	}
-	if len(tokens) == 0 {
-		return nil, errors.New("GATEWAY_CLIENT_TOKENS must contain at least one client token")
 	}
 	return tokens, nil
 }

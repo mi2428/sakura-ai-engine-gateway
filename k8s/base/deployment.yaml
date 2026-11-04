@@ -40,10 +40,8 @@ spec:
           env:
             - name: GATEWAY_MAX_REQUEST_BYTES
               value: "67108864"
-            - name: GATEWAY_MAX_CONCURRENT_REQUESTS
-              value: "24"
-            - name: GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT
-              value: "24"
+            - name: GOMEMLIMIT
+              value: "4GiB"
           startupProbe:
             httpGet:
               path: /health

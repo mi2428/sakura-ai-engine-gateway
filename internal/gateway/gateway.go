@@ -1,4 +1,4 @@
-// Package gateway implements the authenticated Sakura AI Engine API gateway.
+// Package gateway implements the Sakura AI Engine API gateway.
 package gateway
 
 import (
@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 )
@@ -30,14 +29,10 @@ const (
 	lowReasoningEvent      = "data: {\"event\":{\"type\":\"status\",\"data\":{\"description\":\"Retried with low reasoning effort\",\"done\":true}}}\n\n"
 	serverIdleTimeout      = 90 * time.Second
 	clientWriteIdleTimeout = 90 * time.Second
+	clientReadTimeout      = 5 * time.Minute
 	upstreamKeepAlive      = 30 * time.Second
 	upstreamIdleConnLimit  = 32
 )
-
-type clientCredential struct {
-	id        string
-	tokenHash [sha256.Size]byte
-}
 
 type upstreamResponse struct {
 	requestAttempted bool
@@ -48,17 +43,16 @@ type upstreamResponse struct {
 	cancel           context.CancelFunc
 }
 
-// Gateway is an authenticated, OpenAI-compatible Sakura AI Engine gateway.
+// Gateway is an OpenAI-compatible Sakura AI Engine gateway. Access control is
+// enforced by the deployment's network boundary, not by client credentials.
 type Gateway struct {
-	config        Config
-	pool          *tokenPool
-	client        *http.Client
-	transport     *http.Transport
-	logger        *slog.Logger
-	metrics       *gatewayMetrics
-	credentials   []clientCredential
-	permits       chan struct{}
-	clientPermits map[string]chan struct{}
+	config    Config
+	pool      *tokenPool
+	client    *http.Client
+	transport *http.Transport
+	logger    *slog.Logger
+	metrics   *gatewayMetrics
+	memory    *memoryGate
 }
 
 // New builds a gateway from validated configuration.
@@ -70,45 +64,30 @@ func New(config Config, logger *slog.Logger) (*Gateway, error) {
 		return nil, errors.New("logger is required")
 	}
 
-	clientIDs := make([]string, 0, len(config.ClientTokens))
-	clientCount := len(config.ClientTokens)
-	for clientID := range config.ClientTokens {
-		clientIDs = append(clientIDs, clientID)
+	memory, err := newMemoryGate(config)
+	if err != nil {
+		return nil, err
 	}
-	sort.Strings(clientIDs)
-	credentials := make([]clientCredential, 0, len(clientIDs))
-	for _, clientID := range clientIDs {
-		credentials = append(credentials, clientCredential{
-			id:        clientID,
-			tokenHash: sha256.Sum256([]byte(config.ClientTokens[clientID])),
-		})
-	}
-	clientPermits := make(map[string]chan struct{}, clientCount)
-	for _, clientID := range clientIDs {
-		clientPermits[clientID] = make(chan struct{}, config.MaxConcurrentPerClient)
-	}
-	config.ClientTokens = nil
-
-	transport := newUpstreamTransport(config.UpstreamIdleTimeout, config.MaxConcurrent)
+	transport := newUpstreamTransport(config.UpstreamIdleTimeout)
 	return &Gateway{
-		config:        config,
-		pool:          newTokenPool(config),
-		client:        &http.Client{Transport: transport, CheckRedirect: rejectRedirects},
-		transport:     transport,
-		logger:        logger,
-		metrics:       newGatewayMetrics(),
-		credentials:   credentials,
-		permits:       make(chan struct{}, config.MaxConcurrent),
-		clientPermits: clientPermits,
+		config:    config,
+		pool:      newTokenPool(config),
+		client:    &http.Client{Transport: transport, CheckRedirect: rejectRedirects},
+		transport: transport,
+		logger:    logger,
+		metrics:   newGatewayMetrics(),
+		memory:    memory,
 	}, nil
 }
 
-// Close releases idle upstream connections.
+// Close rejects new work, wakes queued requests and releases idle upstream
+// connections without interrupting active streams. It is safe to call twice.
 func (gateway *Gateway) Close() {
+	gateway.memory.close()
 	gateway.transport.CloseIdleConnections()
 }
 
-// ServeHTTP exposes health checks and the authenticated OpenAI-compatible API.
+// ServeHTTP exposes health checks and the OpenAI-compatible API.
 func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if request.Method == http.MethodGet && (request.ContentLength != 0 || len(request.TransferEncoding) > 0) {
 		writeError(writer, http.StatusBadRequest, "request_body_not_allowed", "GET requests must not include a body", nil)
@@ -128,7 +107,7 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 			writeError(writer, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", nil)
 			return
 		}
-		gateway.metrics.serveHTTP(writer, gateway.pool, len(gateway.permits))
+		gateway.metrics.serveHTTP(writer, gateway.pool, gateway.memory.snapshot())
 		return
 	}
 
@@ -143,29 +122,31 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	clientID, ok := gateway.authenticate(request.Header.Get("Authorization"))
-	if !ok {
-		writer.Header().Set("WWW-Authenticate", "Bearer")
-		writeError(writer, http.StatusUnauthorized, "unauthorized", "unauthorized", nil)
+	if request.ContentLength > gateway.config.MaxRequestBytes {
+		writeError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large", nil)
 		return
 	}
-	select {
-	case gateway.permits <- struct{}{}:
-		defer func() { <-gateway.permits }()
-	default:
-		writeError(writer, http.StatusServiceUnavailable, "busy", "gateway is at capacity", http.Header{"Retry-After": {"1"}})
+	cost := requestMemoryCost(request, gateway.config.MaxRequestBytes)
+	queueContext, cancelQueue := context.WithTimeout(request.Context(), gateway.config.QueueTimeout)
+	err := gateway.memory.acquire(queueContext, cost)
+	cancelQueue()
+	if err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "memory_unavailable", "gateway memory unavailable or queue limit reached", http.Header{"Retry-After": {"1"}})
 		return
 	}
-	clientPermit := gateway.clientPermits[clientID]
-	select {
-	case clientPermit <- struct{}{}:
-		defer func() { <-clientPermit }()
-	default:
-		writeError(writer, http.StatusServiceUnavailable, "client_busy", "client is at its concurrency limit", http.Header{"Retry-After": {"1"}})
+	defer gateway.memory.release(cost)
+
+	controller := http.NewResponseController(writer)
+	if err := controller.SetReadDeadline(time.Now().Add(clientReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+		writeError(writer, http.StatusInternalServerError, "internal_error", "unable to set request read deadline", nil)
 		return
 	}
 
 	body, err := readRequestBody(writer, request, gateway.config.MaxRequestBytes)
+	if clearError := controller.SetReadDeadline(time.Time{}); clearError != nil && !errors.Is(clearError, http.ErrNotSupported) {
+		writeError(writer, http.StatusInternalServerError, "internal_error", "unable to clear request read deadline", nil)
+		return
+	}
 	if err != nil {
 		if _, tooLarge := errors.AsType[*http.MaxBytesError](err); tooLarge {
 			writeError(writer, http.StatusRequestEntityTooLarge, "request_too_large", "request body too large", nil)
@@ -181,26 +162,10 @@ func (gateway *Gateway) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusInternalServerError, "internal_error", "internal server error", nil)
 		return
 	}
-	gateway.proxy(writer, request, body, clientID, requestID)
+	gateway.proxy(writer, request, body, requestID)
 }
 
-func (gateway *Gateway) authenticate(header string) (string, bool) {
-	scheme, token, found := strings.Cut(header, " ")
-	if !found || !strings.EqualFold(scheme, "Bearer") || token == "" || strings.ContainsAny(token, " \t\r\n") {
-		return "", false
-	}
-
-	digest := sha256.Sum256([]byte(token))
-	matchedClient := ""
-	for _, credential := range gateway.credentials {
-		if subtle.ConstantTimeCompare(digest[:], credential.tokenHash[:]) == 1 {
-			matchedClient = credential.id
-		}
-	}
-	return matchedClient, matchedClient != ""
-}
-
-func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request, body []byte, clientID, requestID string) {
+func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request, body []byte, requestID string) {
 	modelID, hasEffort := requestModel(body)
 	model := gateway.metricModel(modelID)
 	if request.URL.Path == "/v1/chat/completions" {
@@ -230,7 +195,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 			if request.Context().Err() != nil {
 				return
 			}
-			gateway.logger.Warn("account token unavailable", "request_id", requestID, "client", clientID, "wait", sharedWait)
+			gateway.logger.Warn("account token unavailable", "request_id", requestID, "wait", sharedWait)
 			gateway.writeExhausted(writer, http.StatusGatewayTimeout, retryCount, lastReason, effectiveEffort)
 			return
 		}
@@ -238,7 +203,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 
 		upstreamRequest, err := gateway.newUpstreamRequest(request, requestBody, lease.token)
 		if err != nil {
-			gateway.logger.Error("build upstream request", "request_id", requestID, "client", clientID, "error_type", fmt.Sprintf("%T", err))
+			gateway.logger.Error("build upstream request", "request_id", requestID, "error_type", fmt.Sprintf("%T", err))
 			writeError(writer, http.StatusBadGateway, "upstream_error", "unable to build upstream request", retryHeaders(retryCount, lastReason, effectiveEffort))
 			return
 		}
@@ -257,7 +222,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 			if gateway.canRetry(retryCount, delay, deadline) {
 				retryCount++
 				lastReason = reason
-				gateway.logRetry(requestID, clientID, tokenSlot, model, retryCount, reason, delay, sharedWait, 0)
+				gateway.logRetry(requestID, tokenSlot, model, retryCount, reason, delay, sharedWait, 0)
 				if !waitContext(request.Context(), delay) {
 					if request.Context().Err() == nil {
 						gateway.writeExhausted(writer, http.StatusGatewayTimeout, retryCount, lastReason, effectiveEffort)
@@ -270,7 +235,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 			if reason == retryTimeout {
 				status = http.StatusGatewayTimeout
 			}
-			gateway.logger.Warn("upstream request failed", "request_id", requestID, "client", clientID, "token_slot", tokenSlot, "attempt", retryCount+1, "reason", reason, "elapsed", time.Since(attemptStarted), "error_type", fmt.Sprintf("%T", err))
+			gateway.logger.Warn("upstream request failed", "request_id", requestID, "token_slot", tokenSlot, "attempt", retryCount+1, "reason", reason, "elapsed", time.Since(attemptStarted), "error_type", fmt.Sprintf("%T", err))
 			writeError(writer, status, string(reason), "upstream unavailable", retryHeaders(retryCount, lastReason, effectiveEffort))
 			return
 		}
@@ -288,7 +253,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 				cancelAttempt()
 				retryCount++
 				lastReason = reason
-				gateway.logRetry(requestID, clientID, tokenSlot, model, retryCount, reason, scheduled, sharedWait, sharedCooldown)
+				gateway.logRetry(requestID, tokenSlot, model, retryCount, reason, scheduled, sharedWait, sharedCooldown)
 				continue
 			}
 		} else if reason != "" {
@@ -306,7 +271,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 				gateway.pool.recordSuccess(lease)
 				retryCount++
 				lastReason = reason
-				gateway.logRetry(requestID, clientID, tokenSlot, model, retryCount, reason, delay, sharedWait, 0)
+				gateway.logRetry(requestID, tokenSlot, model, retryCount, reason, delay, sharedWait, 0)
 				if !waitContext(request.Context(), delay) {
 					if request.Context().Err() == nil {
 						gateway.writeExhausted(writer, http.StatusGatewayTimeout, retryCount, lastReason, effectiveEffort)
@@ -327,7 +292,7 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 			if reason == retryTimeout {
 				status = http.StatusGatewayTimeout
 			}
-			gateway.logger.Warn("provider error exhausted", "request_id", requestID, "client", clientID, "token_slot", tokenSlot, "attempt", retryCount+1, "reason", reason, "status", status)
+			gateway.logger.Warn("provider error exhausted", "request_id", requestID, "token_slot", tokenSlot, "attempt", retryCount+1, "reason", reason, "status", status)
 			writeError(writer, status, string(reason), "provider retry exhausted", retryHeaders(retryCount, lastReason, effectiveEffort))
 			return
 		}
@@ -342,10 +307,10 @@ func (gateway *Gateway) proxy(writer http.ResponseWriter, request *http.Request,
 			gateway.pool.recordSuccess(lease)
 		}
 		if streamError != nil {
-			gateway.logger.Warn("stream terminated", "request_id", requestID, "client", clientID, "token_slot", tokenSlot, "status", response.StatusCode, "error_type", fmt.Sprintf("%T", streamError))
+			gateway.logger.Warn("stream terminated", "request_id", requestID, "token_slot", tokenSlot, "status", response.StatusCode, "error_type", fmt.Sprintf("%T", streamError))
 			return
 		}
-		gateway.logger.Info("upstream response", "request_id", requestID, "client", clientID, "token_slot", tokenSlot, "attempts", retryCount+1, "status", response.StatusCode, "retry_reason", reason, "elapsed", time.Since(attemptStarted), "shared_wait", sharedWait)
+		gateway.logger.Info("upstream response", "request_id", requestID, "token_slot", tokenSlot, "attempts", retryCount+1, "status", response.StatusCode, "retry_reason", reason, "elapsed", time.Since(attemptStarted), "shared_wait", sharedWait)
 		return
 	}
 }
@@ -513,12 +478,12 @@ func (gateway *Gateway) writeExhausted(writer http.ResponseWriter, status, retry
 	writeError(writer, status, code, message, retryHeaders(retryCount, reason, effort))
 }
 
-func (gateway *Gateway) logRetry(requestID, clientID string, tokenSlot int, model string, retryCount int, reason retryReason, scheduled, sharedWait, cooldown time.Duration) {
+func (gateway *Gateway) logRetry(requestID string, tokenSlot int, model string, retryCount int, reason retryReason, scheduled, sharedWait, cooldown time.Duration) {
 	gateway.metrics.recordRetry(tokenSlot, model, string(reason))
-	gateway.logger.Info("retry upstream request", "request_id", requestID, "client", clientID, "token_slot", tokenSlot, "retry", retryCount, "reason", reason, "scheduled", scheduled, "shared_wait", sharedWait, "cooldown_wait", cooldown)
+	gateway.logger.Info("retry upstream request", "request_id", requestID, "token_slot", tokenSlot, "retry", retryCount, "reason", reason, "scheduled", scheduled, "shared_wait", sharedWait, "cooldown_wait", cooldown)
 }
 
-func newUpstreamTransport(idleTimeout time.Duration, maxConcurrent int) *http.Transport {
+func newUpstreamTransport(idleTimeout time.Duration) *http.Transport {
 	dialer := &net.Dialer{Timeout: idleTimeout, KeepAlive: upstreamKeepAlive}
 	return &http.Transport{
 		Proxy: nil,
@@ -528,9 +493,8 @@ func newUpstreamTransport(idleTimeout time.Duration, maxConcurrent int) *http.Tr
 		// Per-operation deadlines on a shared connection would interfere with
 		// unrelated HTTP/2 streams, so this transport intentionally uses HTTP/1.
 		ForceAttemptHTTP2:     false,
-		MaxConnsPerHost:       maxConcurrent,
 		MaxIdleConns:          upstreamIdleConnLimit,
-		MaxIdleConnsPerHost:   maxConcurrent,
+		MaxIdleConnsPerHost:   upstreamIdleConnLimit,
 		IdleConnTimeout:       serverIdleTimeout,
 		TLSHandshakeTimeout:   idleTimeout,
 		ResponseHeaderTimeout: idleTimeout,
@@ -757,12 +721,6 @@ func (gateway *Gateway) metricModel(value string) string {
 	if len(value) > maxModelBytes {
 		return unknownModel
 	}
-	valueHash := sha256.Sum256([]byte(value))
-	for _, credential := range gateway.credentials {
-		if value == credential.id || subtle.ConstantTimeCompare(valueHash[:], credential.tokenHash[:]) == 1 || value == hex.EncodeToString(credential.tokenHash[:]) {
-			return unknownModel
-		}
-	}
 	for _, slot := range gateway.pool.slots {
 		if subtle.ConstantTimeCompare([]byte(value), []byte(slot.value)) == 1 {
 			return unknownModel
@@ -802,6 +760,9 @@ func writeJSON(writer http.ResponseWriter, status int, payload any, headers http
 }
 
 func writeError(writer http.ResponseWriter, status int, code, message string, headers http.Header) {
+	// Error paths can reject headers before reading a body. Prevent net/http's
+	// automatic upload drain from blocking the response without a read deadline.
+	writer.Header().Set("Connection", "close")
 	writeJSON(writer, status, map[string]any{"error": map[string]string{"code": code, "message": message}}, headers)
 }
 

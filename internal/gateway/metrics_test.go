@@ -118,15 +118,10 @@ func TestGatewaySuppressesCredentialValuesFromModelLabels(t *testing.T) {
 		_, _ = io.WriteString(writer, `{"choices":[]}`)
 	})
 	server, gateway := startTestGateway(t, testConfig(nil), upstream)
-	clientToken := strings.Repeat("h", 32)
-	clientTokenHash := sha256.Sum256([]byte(clientToken))
 	accountTokenHash := sha256.Sum256([]byte("account-token-a"))
 	for _, credential := range []string{
 		"account-token-a",
 		hex.EncodeToString(accountTokenHash[:]),
-		"hermes",
-		clientToken,
-		hex.EncodeToString(clientTokenHash[:]),
 	} {
 		if got := gateway.metricModel(credential); got != unknownModel {
 			t.Errorf("credential-like model label = %q, want %q", got, unknownModel)
@@ -135,7 +130,7 @@ func TestGatewaySuppressesCredentialValuesFromModelLabels(t *testing.T) {
 	if got := gateway.metricModel("preview/Kimi-K2.7-Code"); got != "preview/Kimi-K2.7-Code" {
 		t.Fatalf("model label = %q", got)
 	}
-	response := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", clientToken, strings.NewReader(`{"model":"account-token-a"}`), nil)
+	response := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", "", strings.NewReader(`{"model":"account-token-a"}`), nil)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("completion status = %d, body = %s", response.StatusCode, response.Body)
 	}

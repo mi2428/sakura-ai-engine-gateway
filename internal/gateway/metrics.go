@@ -129,7 +129,7 @@ func (metrics *gatewayMetrics) recordUsage(accountSlot int, model string, usage 
 	}
 }
 
-func (metrics *gatewayMetrics) serveHTTP(writer http.ResponseWriter, pool *tokenPool, inFlight int) {
+func (metrics *gatewayMetrics) serveHTTP(writer http.ResponseWriter, pool *tokenPool, memory memorySnapshot) {
 	writer.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	writer.Header().Set("Cache-Control", "no-store")
 
@@ -143,9 +143,23 @@ func (metrics *gatewayMetrics) serveHTTP(writer http.ResponseWriter, pool *token
 	metrics.mu.Unlock()
 
 	var output strings.Builder
-	appendHeader(&output, "sakura_ai_engine_gateway_in_flight_requests", "Number of authenticated requests currently holding a gateway concurrency permit.", "gauge")
-	appendSample(&output, "sakura_ai_engine_gateway_in_flight_requests", strconv.Itoa(inFlight))
-	appendHeader(&output, "sakura_ai_engine_gateway_chat_completion_requests_total", "Number of authenticated chat completion requests accepted by the gateway, counted once per caller request regardless of upstream retries.", "counter")
+	appendHeader(&output, "sakura_ai_engine_gateway_in_flight_requests", "Number of requests currently holding a memory reservation.", "gauge")
+	appendSample(&output, "sakura_ai_engine_gateway_in_flight_requests", strconv.Itoa(memory.active))
+	appendHeader(&output, "sakura_ai_engine_gateway_queued_requests", "Number of requests waiting for memory before reading their bodies.", "gauge")
+	appendSample(&output, "sakura_ai_engine_gateway_queued_requests", strconv.Itoa(memory.queued))
+	appendHeader(&output, "sakura_ai_engine_gateway_memory_usage_bytes", "Last successfully measured cgroup memory usage; consult memory_available for validity.", "gauge")
+	appendSample(&output, "sakura_ai_engine_gateway_memory_usage_bytes", strconv.FormatInt(memory.used, 10))
+	appendHeader(&output, "sakura_ai_engine_gateway_memory_limit_bytes", "Cgroup hard memory limit read at startup.", "gauge")
+	appendSample(&output, "sakura_ai_engine_gateway_memory_limit_bytes", strconv.FormatInt(memory.limit, 10))
+	appendHeader(&output, "sakura_ai_engine_gateway_memory_reserved_bytes", "Conservative memory reservations held by active requests.", "gauge")
+	appendSample(&output, "sakura_ai_engine_gateway_memory_reserved_bytes", strconv.FormatInt(memory.reserved, 10))
+	appendHeader(&output, "sakura_ai_engine_gateway_memory_available", "Whether the latest cgroup memory sample succeeded.", "gauge")
+	available := "0"
+	if memory.available {
+		available = "1"
+	}
+	appendSample(&output, "sakura_ai_engine_gateway_memory_available", available)
+	appendHeader(&output, "sakura_ai_engine_gateway_chat_completion_requests_total", "Number of chat completion requests accepted by the gateway, counted once per caller request regardless of upstream retries.", "counter")
 	for _, model := range sortedKeys(chatRequests, func(left, right string) bool { return left < right }) {
 		appendSample(&output, "sakura_ai_engine_gateway_chat_completion_requests_total", label("model", model), strconv.FormatUint(chatRequests[model], 10))
 	}

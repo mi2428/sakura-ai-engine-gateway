@@ -7,13 +7,13 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
 func TestRunRejectsMissingCredentials(t *testing.T) {
 	t.Setenv("SAKURA_AI_ENGINE_ACCOUNT_TOKENS", "")
-	t.Setenv("GATEWAY_CLIENT_TOKENS", "")
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	if err := run(context.Background(), logger); err == nil {
 		t.Fatal("run() accepted missing credentials")
@@ -22,8 +22,8 @@ func TestRunRejectsMissingCredentials(t *testing.T) {
 
 func TestRunGracefullyStopsOnContextCancellation(t *testing.T) {
 	for _, name := range []string{
-		"SAKURA_AI_ENGINE_API_URL", "GATEWAY_MAX_REQUEST_BYTES", "GATEWAY_MAX_CONCURRENT_REQUESTS",
-		"GATEWAY_MAX_CONCURRENT_REQUESTS_PER_CLIENT", "SAKURA_RETRY_MAX", "SAKURA_RETRY_BASE_INTERVAL",
+		"SAKURA_AI_ENGINE_API_URL", "GATEWAY_MAX_REQUEST_BYTES", "GATEWAY_MAX_QUEUED_REQUESTS",
+		"GATEWAY_QUEUE_TIMEOUT", "SAKURA_RETRY_MAX", "SAKURA_RETRY_BASE_INTERVAL",
 		"SAKURA_RETRY_MAX_INTERVAL", "SAKURA_RETRY_JITTER", "SAKURA_RETRY_BUDGET", "SAKURA_UPSTREAM_IDLE_TIMEOUT",
 	} {
 		t.Setenv(name, "")
@@ -38,7 +38,13 @@ func TestRunGracefullyStopsOnContextCancellation(t *testing.T) {
 	}
 	t.Setenv("GATEWAY_LISTEN_ADDRESS", address)
 	t.Setenv("SAKURA_AI_ENGINE_ACCOUNT_TOKENS", `["test-account"]`)
-	t.Setenv("GATEWAY_CLIENT_TOKENS", `{"test":"01234567890123456789012345678901"}`)
+	cgroup := t.TempDir()
+	for name, value := range map[string]string{"memory.max": "6442450944", "memory.current": "0"} {
+		if err := os.WriteFile(filepath.Join(cgroup, name), []byte(value), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("GATEWAY_MEMORY_CGROUP_PATH", cgroup)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -76,9 +82,7 @@ func TestRunGracefullyStopsOnContextCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("run() did not stop after context cancellation")
 	}
-	for _, name := range []string{"SAKURA_AI_ENGINE_ACCOUNT_TOKENS", "GATEWAY_CLIENT_TOKENS"} {
-		if _, exists := os.LookupEnv(name); exists {
-			t.Errorf("secret environment variable %s was not removed", name)
-		}
+	if _, exists := os.LookupEnv("SAKURA_AI_ENGINE_ACCOUNT_TOKENS"); exists {
+		t.Error("secret account tokens were not removed from the environment")
 	}
 }

@@ -30,24 +30,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	clientCount := len(config.ClientTokens)
 	proxy, err := gateway.New(config, logger)
 	if err != nil {
 		return err
 	}
 	defer proxy.Close()
-	clear(config.ClientTokens)
-	for _, name := range []string{"SAKURA_AI_ENGINE_ACCOUNT_TOKENS", "GATEWAY_CLIENT_TOKENS"} {
-		if err := os.Unsetenv(name); err != nil {
-			return fmt.Errorf("remove %s from process environment: %w", name, err)
-		}
+	if err := os.Unsetenv("SAKURA_AI_ENGINE_ACCOUNT_TOKENS"); err != nil {
+		return fmt.Errorf("remove account tokens from process environment: %w", err)
 	}
 
 	server := &http.Server{
 		Addr:              config.ListenAddress,
 		Handler:           proxy,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       90 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 		// WriteTimeout is intentionally unset: a valid completion may stream for
@@ -61,12 +56,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 		serverErrors <- err
 	}()
-	logger.Info("gateway listening", "address", config.ListenAddress, "upstream", config.UpstreamURL.Host, "account_tokens", len(config.AccountTokens), "clients", clientCount)
+	logger.Info("gateway listening", "address", config.ListenAddress, "upstream", config.UpstreamURL.Host, "account_tokens", len(config.AccountTokens))
 
 	select {
 	case err := <-serverErrors:
 		return err
 	case <-ctx.Done():
+		proxy.Close()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		shutdownError := server.Shutdown(shutdownContext)

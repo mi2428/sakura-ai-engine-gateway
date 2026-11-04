@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -30,16 +29,24 @@ func startTestGateway(t *testing.T, config Config, upstream http.Handler) (*http
 	config.MaxBackoff = 5 * time.Millisecond
 	config.Jitter = 0
 	config.RetryBudget = 3200 * time.Second
-	proxy, err := New(config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	proxy, err := newTestGateway(t, config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(proxy)
 	t.Cleanup(func() {
-		server.Close()
 		proxy.Close()
+		server.Close()
 	})
 	return server, proxy
+}
+
+func newTestGateway(t *testing.T, config Config, logger *slog.Logger) (*Gateway, error) {
+	t.Helper()
+	if config.MemoryCgroupPath == defaultMemoryCgroupPath {
+		config.MemoryCgroupPath = testMemoryCgroup(t)
+	}
+	return New(config, logger)
 }
 
 type testResponse struct {
@@ -77,14 +84,14 @@ func sendRequest(t *testing.T, client *http.Client, method, endpoint, token stri
 	return testResponse{StatusCode: response.StatusCode, Header: response.Header.Clone(), Body: responseBody}
 }
 
-func TestGatewayHealthAndClientAuthentication(t *testing.T) {
+func TestGatewayHealthAndUnauthenticatedAPI(t *testing.T) {
 	var upstreamRequests atomic.Int32
 	upstream := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		upstreamRequests.Add(1)
 		if request.URL.Path != "/v1/models" || request.URL.RawQuery != "limit=2" {
 			t.Errorf("upstream URL = %s?%s", request.URL.Path, request.URL.RawQuery)
 		}
-		if got := request.Header.Get("Authorization"); got != "Bearer account-token-a" {
+		if got := request.Header.Get("Authorization"); got != "Bearer account-token-a" && got != "Bearer account-token-b" {
 			t.Errorf("upstream Authorization = %q", got)
 		}
 		if request.Header.Get("X-OpenWebUI-Mode") != "" {
@@ -112,12 +119,9 @@ func TestGatewayHealthAndClientAuthentication(t *testing.T) {
 	if response.StatusCode != http.StatusOK || string(response.Body) != `{"status":"ok"}` {
 		t.Fatalf("health response = %d %s", response.StatusCode, response.Body)
 	}
-	response = sendRequest(t, client, http.MethodGet, server.URL+"/v1/models", "wrong-token", nil, nil)
-	if response.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthorized status = %d", response.StatusCode)
-	}
-	if upstreamRequests.Load() != 0 {
-		t.Fatalf("unauthorized request reached upstream %d times", upstreamRequests.Load())
+	response = sendRequest(t, client, http.MethodGet, server.URL+"/v1/models?limit=2", "", nil, nil)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unauthenticated API status = %d", response.StatusCode)
 	}
 
 	headers := http.Header{
@@ -135,20 +139,8 @@ func TestGatewayHealthAndClientAuthentication(t *testing.T) {
 	if response.Header.Get("X-Upstream-Hop") != "" || response.Header.Get("X-Sakura-Retry-Count") != "" || response.Header.Get("Set-Cookie") != "" {
 		t.Fatalf("untrusted response headers were forwarded: %v", response.Header)
 	}
-	if upstreamRequests.Load() != 1 {
-		t.Fatalf("upstream request count = %d, want 1", upstreamRequests.Load())
-	}
-}
-
-func TestGatewayStoresOnlyCallerTokenHashes(t *testing.T) {
-	config := testConfig(nil)
-	gateway, err := New(config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gateway.Close()
-	if gateway.config.ClientTokens != nil || gateway.pool.config.ClientTokens != nil {
-		t.Fatal("gateway retained plaintext caller tokens")
+	if upstreamRequests.Load() != 2 {
+		t.Fatalf("upstream request count = %d, want 2", upstreamRequests.Load())
 	}
 }
 
@@ -221,7 +213,7 @@ func TestKimiReasoningDefaultPreservesCallerOverrides(t *testing.T) {
 	}
 }
 
-func TestGatewayRotatesRateLimitedAccountAndPreservesCallerIdentity(t *testing.T) {
+func TestGatewayRotatesRateLimitedAccount(t *testing.T) {
 	var attempts atomic.Int32
 	var accountHeaders []string
 	var mutex sync.Mutex
@@ -252,8 +244,8 @@ func TestGatewayRotatesRateLimitedAccountAndPreservesCallerIdentity(t *testing.T
 	}
 }
 
-func TestGatewayAllows24ConcurrentRequestsWithOneUpstreamToken(t *testing.T) {
-	const concurrentRequests = 24
+func TestGatewayAllowsMoreThan32ConcurrentRequestsWithOneUpstreamToken(t *testing.T) {
+	const concurrentRequests = 40
 	started := make(chan struct{}, concurrentRequests)
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -281,15 +273,13 @@ func TestGatewayAllows24ConcurrentRequestsWithOneUpstreamToken(t *testing.T) {
 	config.UpstreamURL, _ = url.Parse(upstream.URL)
 	config.AccountTokens = []string{"single-upstream-token"}
 	config.MaxRequestBytes = 64 << 20
-	config.MaxConcurrent = concurrentRequests
-	config.MaxConcurrentPerClient = concurrentRequests
 	config.UpstreamIdleTimeout = 5 * time.Second
-	proxy, err := New(config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	proxy, err := newTestGateway(t, config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(proxy)
-	t.Cleanup(func() { server.Close(); proxy.Close() })
+	t.Cleanup(func() { proxy.Close(); server.Close() })
 
 	type result struct {
 		status int
@@ -304,7 +294,6 @@ func TestGatewayAllows24ConcurrentRequestsWithOneUpstreamToken(t *testing.T) {
 				responses <- result{err: err}
 				return
 			}
-			request.Header.Set("Authorization", "Bearer "+strings.Repeat("o", 32))
 			response, err := server.Client().Do(request)
 			if err != nil {
 				responses <- result{err: err}
@@ -320,7 +309,7 @@ func TestGatewayAllows24ConcurrentRequestsWithOneUpstreamToken(t *testing.T) {
 		select {
 		case <-started:
 		case <-time.After(5 * time.Second):
-			t.Fatal("all 24 requests did not reach the upstream with one token")
+			t.Fatal("all 40 requests did not reach the upstream with one token")
 		}
 	}
 	releaseOnce.Do(func() { close(release) })
@@ -524,12 +513,12 @@ func TestGatewayForwardsSSEHeartbeatBeforeFirstEvent(t *testing.T) {
 	config := testConfig(nil)
 	config.UpstreamURL, _ = url.Parse(upstream.URL)
 	config.UpstreamIdleTimeout = 5 * time.Second
-	proxy, err := New(config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	proxy, err := newTestGateway(t, config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(proxy)
-	t.Cleanup(func() { server.Close(); proxy.Close() })
+	t.Cleanup(func() { proxy.Close(); server.Close() })
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{}`))
 	if err != nil {
 		t.Fatal(err)
@@ -715,8 +704,6 @@ func TestGatewayStopsUpstreamAndReleasesLeaseWhenClientCancels(t *testing.T) {
 	})
 	config := testConfig(nil)
 	config.AccountTokens = []string{"one-upstream-token"}
-	config.MaxConcurrent = 1
-	config.MaxConcurrentPerClient = 1
 	server, _ := startTestGateway(t, config, upstream)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -757,7 +744,7 @@ func TestRetryBudgetRejectsUnfittingAttempt(t *testing.T) {
 	config.MaxRetries = 1
 	config.UpstreamIdleTimeout = time.Second
 	config.RetryBudget = 3200 * time.Second
-	proxy, err := New(config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	proxy, err := newTestGateway(t, config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +757,7 @@ func TestRetryBudgetRejectsUnfittingAttempt(t *testing.T) {
 	proxy.Close()
 }
 
-func TestGatewayBoundsRequestBodyAndConcurrency(t *testing.T) {
+func TestGatewayBoundsRequestBody(t *testing.T) {
 	t.Run("body limit", func(t *testing.T) {
 		var calls atomic.Int32
 		upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -781,135 +768,18 @@ func TestGatewayBoundsRequestBodyAndConcurrency(t *testing.T) {
 		config := testConfig(nil)
 		config.UpstreamURL, _ = url.Parse(upstream.URL)
 		config.MaxRequestBytes = 4
-		proxy, err := New(config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+		proxy, err := newTestGateway(t, config, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 		if err != nil {
 			t.Fatal(err)
 		}
 		server := httptest.NewServer(proxy)
-		t.Cleanup(func() { server.Close(); proxy.Close() })
+		t.Cleanup(func() { proxy.Close(); server.Close() })
 		response := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", strings.Repeat("w", 32), strings.NewReader("12345"), nil)
 		if response.StatusCode != http.StatusRequestEntityTooLarge || calls.Load() != 0 {
 			t.Fatalf("oversized request = %d, upstream calls=%d", response.StatusCode, calls.Load())
 		}
 	})
 
-	t.Run("concurrency cap", func(t *testing.T) {
-		started := make(chan struct{}, 1)
-		release := make(chan struct{})
-		upstream := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			started <- struct{}{}
-			select {
-			case <-release:
-			case <-request.Context().Done():
-			}
-			writer.WriteHeader(http.StatusOK)
-		})
-		config := testConfig(nil)
-		config.MaxConcurrent = 1
-		config.MaxConcurrentPerClient = 1
-		server, _ := startTestGateway(t, config, upstream)
-		firstDone := make(chan error, 1)
-		go func() {
-			request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{}`))
-			if err != nil {
-				firstDone <- err
-				return
-			}
-			request.Header.Set("Authorization", "Bearer "+strings.Repeat("w", 32))
-			response, err := server.Client().Do(request)
-			if err == nil {
-				_, err = io.Copy(io.Discard, response.Body)
-				_ = response.Body.Close()
-			}
-			firstDone <- err
-		}()
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("first request did not reach upstream")
-		}
-		response := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", strings.Repeat("o", 32), strings.NewReader(`{}`), nil)
-		if response.StatusCode != http.StatusServiceUnavailable || response.Header.Get("Retry-After") != "1" {
-			t.Fatalf("busy response = %d, Retry-After=%q", response.StatusCode, response.Header.Get("Retry-After"))
-		}
-		close(release)
-		select {
-		case err := <-firstDone:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-time.After(time.Second):
-			t.Fatal("first request did not finish")
-		}
-	})
-
-	t.Run("per-client fairness", func(t *testing.T) {
-		started := make(chan struct{}, 2)
-		release := make(chan struct{})
-		var releaseOnce sync.Once
-		defer releaseOnce.Do(func() { close(release) })
-		upstream := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-			started <- struct{}{}
-			select {
-			case <-release:
-			case <-request.Context().Done():
-			}
-			writer.WriteHeader(http.StatusOK)
-		})
-		config := testConfig(nil)
-		config.MaxConcurrent = 2
-		config.MaxConcurrentPerClient = 1
-		server, _ := startTestGateway(t, config, upstream)
-		requestDone := func(clientToken string) <-chan error {
-			done := make(chan error, 1)
-			go func() {
-				request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(`{}`))
-				if err != nil {
-					done <- err
-					return
-				}
-				request.Header.Set("Authorization", "Bearer "+clientToken)
-				response, err := server.Client().Do(request)
-				if err == nil {
-					_, err = io.Copy(io.Discard, response.Body)
-					_ = response.Body.Close()
-					if response.StatusCode != http.StatusOK {
-						err = fmt.Errorf("unexpected status %d", response.StatusCode)
-					}
-				}
-				done <- err
-			}()
-			return done
-		}
-
-		firstDone := requestDone(strings.Repeat("w", 32))
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("first client did not reach upstream")
-		}
-		busy := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", strings.Repeat("w", 32), strings.NewReader(`{}`), nil)
-		if busy.StatusCode != http.StatusServiceUnavailable || busy.Header.Get("Retry-After") != "1" {
-			t.Fatalf("same-client limit response = %d, Retry-After=%q", busy.StatusCode, busy.Header.Get("Retry-After"))
-		}
-		secondDone := requestDone(strings.Repeat("h", 32))
-		select {
-		case <-started:
-		case <-time.After(time.Second):
-			t.Fatal("a separate client was blocked by the first client's limit")
-		}
-		releaseOnce.Do(func() { close(release) })
-		for _, done := range []<-chan error{firstDone, secondDone} {
-			select {
-			case err := <-done:
-				if err != nil {
-					t.Fatal(err)
-				}
-			case <-time.After(time.Second):
-				t.Fatal("concurrent request did not finish")
-			}
-		}
-	})
 }
 
 func TestGatewayDoesNotLogCallerOrUpstreamSecrets(t *testing.T) {
@@ -923,13 +793,13 @@ func TestGatewayDoesNotLogCallerOrUpstreamSecrets(t *testing.T) {
 	config := testConfig(nil)
 	config.UpstreamURL, _ = url.Parse(upstreamServer.URL)
 	logger := slog.New(slog.NewJSONHandler(logs, nil))
-	proxy, err := New(config, logger)
+	proxy, err := newTestGateway(t, config, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(proxy)
-	t.Cleanup(func() { server.Close(); proxy.Close() })
-	callerToken := config.ClientTokens["opencode"]
+	t.Cleanup(func() { proxy.Close(); server.Close() })
+	callerToken := "unused-client-authorization"
 	response := sendRequest(t, server.Client(), http.MethodPost, server.URL+"/v1/chat/completions", callerToken, strings.NewReader(`{"prompt":"do not log this"}`), nil)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", response.StatusCode)
@@ -944,8 +814,8 @@ func TestGatewayDoesNotLogCallerOrUpstreamSecrets(t *testing.T) {
 			t.Fatalf("logs contain sensitive content %q", secret)
 		}
 	}
-	if !strings.Contains(logs.String(), `"client":"opencode"`) {
-		t.Fatalf("logs do not identify the caller: %s", logs.String())
+	if strings.Contains(logs.String(), `"client":`) {
+		t.Fatalf("logs must not identify clients: %s", logs.String())
 	}
 }
 
